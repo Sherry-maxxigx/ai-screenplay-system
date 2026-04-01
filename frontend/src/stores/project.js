@@ -1,0 +1,30 @@
+import { reactive } from 'vue'
+
+export const globalState = reactive({
+  title: '白潮回响',
+  track: '主线',
+  theme: '悬疑科幻',
+  audience: '18-35岁',
+  worldTime: '近未来',
+  worldRules: '人工智能已经深度参与灾害预警和海上科研',
+  worldConflict: '真相调查与失控系统之间的对抗',
+  agents: ['主角组', '反派力量', '系统变量'],
+  pace: 80,
+  taboos: '避免低俗桥段，避免无意义反转',
+  chars: [
+    { name: '林澈', role: '主角', arc: '从逃避过去到主动面对真相', locked: true },
+    { name: '顾南舟', role: '关键线索人物', arc: '从失踪者变成推动真相的核心线索', locked: true },
+  ],
+  pipelineRequirements: '',
+  pipelineThemeInput: '',
+  pipelineSettingInput: '',
+  pipelineProtagonistInput: '',
+  pipelineConflictInput: '',
+  pipelineStyleInput: '',
+  pipelineEndingInput: '',
+  pipelineExtraInput: '',
+  pipelineCharacters: '',
+  pipelineOutline: '',
+  pipelineActiveStep: 0,
+  scriptContent: '',
+})

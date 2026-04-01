@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  # 前端服务
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    networks:
+      - screenplay-network
+
+  # 后端服务
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - mysql
+      - mongodb
+      - neo4j
+      - milvus
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=password
+      - MYSQL_DATABASE=screenplay_system
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DATABASE=screenplay_system
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+    networks:
+      - screenplay-network
+
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_DATABASE=screenplay_system
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - screenplay-network
+
+  # MongoDB数据库
+  mongodb:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - screenplay-network
+
+  # Neo4j图数据库
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - screenplay-network
+
+  # Milvus向量数据库
+  milvus:
+    image: milvusdb/milvus:v2.2.11
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      MINIO_ADDRESS: localhost
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    networks:
+      - screenplay-network
+
+volumes:
+  mysql-data:
+  mongodb-data:
+  neo4j-data:
+  milvus-data:
+
+networks:
+  screenplay-network:
+    driver: bridge
