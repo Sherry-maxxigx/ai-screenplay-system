@@ -281,6 +281,23 @@
             :rows="22"
             placeholder="这里会出现系统生成的剧本正文。"
           />
+
+          <div class="advisor-panel">
+            <div class="advisor-head">
+              <h4>AI 修改建议助手（给不懂剧本结构的用户）</h4>
+              <el-button size="small" @click="generateScriptAdvice" :loading="adviceLoading">
+                一键生成修改建议
+              </el-button>
+            </div>
+            <el-input
+              v-model="scriptAdvice"
+              type="textarea"
+              :rows="8"
+              readonly
+              placeholder="点击“一键生成修改建议”，AI 会告诉你哪里有问题、怎么改、改完会有什么效果。"
+            />
+          </div>
+
           <div class="action-bar">
             <el-button @click="activeStep = 2" size="large">返回上一步</el-button>
             <el-button type="success" size="large" @click="finishPipeline">进入高级编辑器</el-button>
@@ -300,6 +317,7 @@ import {
   generateCharacters as apiGenerateCharacters,
   generateOutline as apiGenerateOutline,
   generatePipelineScript,
+  analyzePlotWithAdvice,
 } from '../api/ai'
 import { globalState } from '../stores/project'
 
@@ -310,6 +328,8 @@ const loadingData = ref(false)
 const progressValue = ref(0)
 const progressText = ref('')
 const lastRuleValidation = ref(null)
+const scriptAdvice = ref('')
+const adviceLoading = ref(false)
 let progressTimer = null
 
 const stepTitles = ['核心设定', '人物设定', '剧情大纲', '剧本正文']
@@ -466,6 +486,26 @@ const generateScript = async () => {
     ElMessage.warning('剧本正文生成失败，请稍后重试。')
   } finally {
     loadingData.value = false
+  }
+}
+
+const generateScriptAdvice = async () => {
+  const sourceText = cleanGeneratedText(script.value)
+  if (!sourceText) {
+    ElMessage.warning('请先生成剧本正文，再获取修改建议。')
+    return
+  }
+
+  adviceLoading.value = true
+  try {
+    const response = await analyzePlotWithAdvice(sourceText)
+    scriptAdvice.value = cleanGeneratedText(response?.data?.analysis || '')
+    ElMessage.success('AI 修改建议已生成。')
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('建议生成失败，请稍后重试。')
+  } finally {
+    adviceLoading.value = false
   }
 }
 
@@ -768,6 +808,27 @@ const finishPipeline = () => {
 
 .preview-card {
   background: linear-gradient(135deg, #f0f6ff 0%, #f8fbff 100%);
+}
+
+.advisor-panel {
+  margin-top: 18px;
+  padding: 16px;
+  border-radius: 14px;
+  background: #f7fbff;
+  border: 1px solid rgba(33, 104, 173, 0.18);
+}
+
+.advisor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.advisor-head h4 {
+  margin: 0;
+  font-size: 15px;
+  color: #12406c;
 }
 
 .preview-head {

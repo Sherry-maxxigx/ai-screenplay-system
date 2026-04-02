@@ -33,3 +33,8 @@ export const getRuntimeAISettings = async () => {
 export const saveRuntimeAISettings = async (payload) => {
   return await apiClient.post('/ai/runtime-settings', payload)
 }
+
+export const analyzePlotWithAdvice = async (script, model) => {
+  return await apiClient.post('/ai/analyze-plot', { script, model })
+}
+

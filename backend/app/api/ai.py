@@ -40,6 +40,11 @@ class AIGenerateRequest(BaseModel):
     max_tokens: int = 2000
 
 
+class AnalyzePlotRequest(BaseModel):
+    script: str = Field(min_length=1)
+    model: Optional[str] = None
+
+
 class AIFunctionCallRequest(BaseModel):
     prompt: str
     functions: list[Any]
@@ -504,14 +509,14 @@ def generate_script(prompt: str, model: Optional[str] = None):
 
 
 @router.post("/analyze-plot")
-def analyze_plot(script: str, model: Optional[str] = None):
+def analyze_plot(request: AnalyzePlotRequest):
     try:
         analyze_prompt = (
             "请用中文分析下面剧本的主要冲突、人物动机、伏笔和可能的结构问题。"
             "只输出中文，不要使用 Markdown，不要出现星号或代码块。\n\n"
-            f"{script}"
+            f"{request.script}"
         )
-        content, effective = generate_clean_content(analyze_prompt, model=model, max_tokens=2500)
+        content, effective = generate_clean_content(analyze_prompt, model=request.model, max_tokens=2500)
         return {"analysis": content, "meta": build_meta(effective, "model", "analyze_plot")}
     except HTTPException:
         raise
