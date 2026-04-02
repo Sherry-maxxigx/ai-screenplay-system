@@ -1,7 +1,7 @@
 <template>
   <div class="app-shell">
     <el-container class="app-layout">
-      <el-header height="76px" class="app-header">
+      <el-header v-if="showHeader" height="76px" class="app-header">
         <div class="brand-block">
           <div class="brand-mark">AI</div>
           <div>
@@ -17,14 +17,12 @@
         </nav>
 
         <div class="user-profile">
-          <el-avatar
-            size="small"
-            src="https://cube.elemecdn.com/3/7c/3ea6beec64369c2642b92c6726f1epng.png"
-          />
+          <el-avatar size="small">{{ (authState.user?.username || 'U').slice(0, 1).toUpperCase() }}</el-avatar>
           <div>
-            <strong>创作会话</strong>
-            <span>workspace_001</span>
+            <strong>{{ authState.user?.username || '创作会话' }}</strong>
+            <span>{{ authState.user?.role || 'workspace_001' }}</span>
           </div>
+          <el-button size="small" text @click="handleLogout">退出</el-button>
         </div>
       </el-header>
 
@@ -34,6 +32,24 @@
     </el-container>
   </div>
 </template>
+
+<script setup>
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { authState, logout } from './stores/auth'
+
+const route = useRoute()
+const router = useRouter()
+
+const showHeader = computed(() => route.name !== 'Login')
+
+const handleLogout = () => {
+  logout()
+  ElMessage.success('已退出登录')
+  router.replace({ name: 'Login' })
+}
+</script>
 
 <style>
 body {
@@ -137,7 +153,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 160px;
+  min-width: 220px;
   justify-content: flex-end;
 }
 
@@ -153,6 +169,10 @@ body {
 .user-profile span {
   font-size: 11px;
   color: rgba(248, 251, 255, 0.72);
+}
+
+.user-profile .el-button {
+  color: #f6fbff;
 }
 
 .app-main {
