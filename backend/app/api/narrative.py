@@ -129,14 +129,36 @@ def _build_progression_hint(beat_index: int) -> str:
     return hints[(beat_index - 1) % len(hints)]
 
 
+def _get_act_label(beat_index: int) -> tuple[str, int]:
+    if beat_index <= 3:
+        return "第一幕", beat_index
+    if beat_index <= 7:
+        return "第二幕", beat_index - 3
+    if beat_index <= 10:
+        return "第三幕", beat_index - 7
+    return "结局", beat_index - 10
+
+
+def _extract_last_dialogue_hint(text: str) -> str:
+    lines = [line.strip() for line in _normalize_script(text).split("\n") if line.strip()]
+    dialogue_lines = []
+    for i in range(len(lines) - 1):
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,4}", lines[i]):
+            dialogue_lines.append(f"{lines[i]}：{lines[i + 1]}")
+
+    return dialogue_lines[-1] if dialogue_lines else "上一场的对话仍在耳边回响。"
+
+
 def _build_next_beat_text(content: str) -> str:
     cleaned = _normalize_script(content)
     current_scene = _extract_latest_scene(cleaned)
     protagonist = _extract_primary_character(cleaned)
     prop = _extract_recent_prop(cleaned)
     beat_index = _extract_next_beat_index(cleaned)
+    act_label, section_index = _get_act_label(beat_index)
     next_scene = _infer_next_scene_title(current_scene, beat_index)
     progression_hint = _build_progression_hint(beat_index)
+    last_dialogue_hint = _extract_last_dialogue_hint(cleaned)
 
     partner_lines = [
         "你现在继续追下去，可能就回不了头。",
@@ -155,8 +177,13 @@ def _build_next_beat_text(content: str) -> str:
     protagonist_line = protagonist_lines[(beat_index - 1) % len(protagonist_lines)]
 
     return _normalize_script(
-        f"""第{beat_index}场
+        f"""{act_label}·第{section_index}节
+第{beat_index}场
 {next_scene}
+
+承接上场
+上一场位于：{current_scene}
+关键对白：{last_dialogue_hint}
 
 风声逼近，空间里的警报声比刚才更清晰。{protagonist}顺着上一场留下的异常痕迹继续推进，在新的区域里发现与“{prop}”相关的第二层线索，事件从回忆追查转入现实对抗。
 

@@ -67,6 +67,16 @@ class NarrativeRuleEngine:
                     }
                 )
 
+            act_section_hits = len(re.findall(r"(第一幕|第二幕|第三幕|结局)·第\d+节", text))
+            if act_section_hits == 0:
+                errors.append(
+                    {
+                        "code": "ACT_SECTION_MISSING",
+                        "description": "剧本缺少“第几幕第几节”标记，用户难以定位结构。",
+                        "fix_instruction": "请在每场前加“第一幕·第1节”这类标签，并与场次一一对应。",
+                    }
+                )
+
             has_dialogue = bool(re.search(r"[\u4e00-\u9fff]{2,6}[：:]", text))
             if not has_dialogue:
                 errors.append(
