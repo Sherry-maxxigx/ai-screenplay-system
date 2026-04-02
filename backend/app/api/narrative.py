@@ -1,5 +1,5 @@
 import re
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
@@ -59,13 +59,14 @@ def _extract_latest_scene(text: str) -> str:
 
 def _extract_primary_character(text: str) -> str:
     cleaned = _normalize_script(text)
-    names = re.findall(r"^([\u4e00-\u9fff]{2,4})[:：]", cleaned, flags=re.MULTILINE)
+    names = re.findall(r"^([\u4e00-\u9fff]{2,6})[:：]", cleaned, flags=re.MULTILINE)
+    blocked = {"内景", "外景", "画外音", "动作描述", "承接上场", "承接上节", "推进说明", "关键对白"}
     for name in names:
-        if name not in {"内景", "外景", "画外音", "动作描述"}:
+        if name not in blocked:
             return name
     tokens = re.findall(r"[\u4e00-\u9fff]{2,3}", cleaned)
     for token in tokens:
-        if token not in {"内景", "外景", "画外音", "动作描述"}:
+        if token not in blocked:
             return token
     return "主角"
 
@@ -149,7 +150,34 @@ def _extract_last_dialogue_hint(text: str) -> str:
     return dialogue_lines[-1] if dialogue_lines else "上一场的对话仍在耳边回响。"
 
 
-def _build_next_beat_text(content: str) -> str:
+def _extract_outline_anchor(outline: str, act_label: str) -> str:
+    text = _normalize_script(outline)
+    if not text:
+        return ""
+
+    section_map = {
+        "第一幕": ["第一幕"],
+        "第二幕": ["第二幕"],
+        "第三幕": ["第三幕"],
+        "结局": ["结局", "结尾", "余韵", "高潮"],
+    }
+
+    keywords = section_map.get(act_label, [])
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    for idx, line in enumerate(lines):
+        if any(key in line for key in keywords):
+            anchor_lines = [line]
+            for tail in lines[idx + 1: idx + 4]:
+                if any(mark in tail for mark in ["第一幕", "第二幕", "第三幕", "结局", "高潮"]):
+                    break
+                anchor_lines.append(tail)
+            return "；".join(anchor_lines)
+
+    return lines[0] if lines else ""
+
+
+def _build_next_beat_text(content: str, outline: str = "") -> str:
     cleaned = _normalize_script(content)
     current_scene = _extract_latest_scene(cleaned)
     protagonist = _extract_primary_character(cleaned)
@@ -159,6 +187,7 @@ def _build_next_beat_text(content: str) -> str:
     next_scene = _infer_next_scene_title(current_scene, beat_index)
     progression_hint = _build_progression_hint(beat_index)
     last_dialogue_hint = _extract_last_dialogue_hint(cleaned)
+    outline_anchor = _extract_outline_anchor(outline, act_label)
 
     partner_lines = [
         "你现在继续追下去，可能就回不了头。",
@@ -176,6 +205,8 @@ def _build_next_beat_text(content: str) -> str:
     partner_line = partner_lines[(beat_index - 1) % len(partner_lines)]
     protagonist_line = protagonist_lines[(beat_index - 1) % len(protagonist_lines)]
 
+    anchor_line = f"大纲锚点：{outline_anchor}" if outline_anchor else "大纲锚点：延续当前幕核心冲突推进。"
+
     return _normalize_script(
         f"""{act_label}·第{section_index}节
 第{beat_index}场
@@ -184,6 +215,7 @@ def _build_next_beat_text(content: str) -> str:
 承接上场
 上一场位于：{current_scene}
 关键对白：{last_dialogue_hint}
+{anchor_line}
 
 风声逼近，空间里的警报声比刚才更清晰。{protagonist}顺着上一场留下的异常痕迹继续推进，在新的区域里发现与“{prop}”相关的第二层线索，事件从回忆追查转入现实对抗。
 
@@ -265,6 +297,8 @@ async def get_narrative_graph():
 
 class BeatRequest(BaseModel):
     content: str
+    outline: Optional[str] = None
+    characters: Optional[str] = None
 
 
 @router.post("/sync_graph")
@@ -279,7 +313,7 @@ async def generate_next_beat(req: BeatRequest):
     if not content:
         raise HTTPException(status_code=400, detail="当前剧本文本为空，无法生成下一节拍")
 
-    next_beat = _build_next_beat_text(content)
+    next_beat = _build_next_beat_text(content, outline=req.outline or "")
     merged = _normalize_script(f"{content}\n\n{next_beat}")
     graph_data = neo4j_client.simulate_function_call_update(merged)
 

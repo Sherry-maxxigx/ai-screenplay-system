@@ -259,7 +259,11 @@ const handleEditorChange = (value) => {
 const generateNextBeat = async () => {
   loading.value = true
   try {
-    const res = await axios.post('/api/narrative/generate_beat', { content: code.value })
+    const res = await axios.post('/api/narrative/generate_beat', {
+      content: code.value,
+      outline: globalState.pipelineOutline || '',
+      characters: globalState.pipelineCharacters || '',
+    })
     code.value = cleanGeneratedText(`${code.value}\n\n${res.data.text}`)
     if (res.data?.data) {
       renderGraph(res.data.data)
