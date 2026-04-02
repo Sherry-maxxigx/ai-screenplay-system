@@ -116,6 +116,7 @@ const loading = ref(false)
 
 let myChart = null
 let syncTimer = null
+let lastSyncedContent = ''
 
 const contentStats = computed(() => {
   const value = code.value || ''
@@ -223,8 +224,11 @@ const syncGraph = async (content) => {
 const queueGraphSync = (content) => {
   if (syncTimer) clearTimeout(syncTimer)
   syncTimer = setTimeout(() => {
-    syncGraph(content)
-  }, 400)
+    const normalized = cleanGeneratedText(content)
+    if (normalized === lastSyncedContent) return
+    lastSyncedContent = normalized
+    syncGraph(normalized)
+  }, 1200)
 }
 
 const initChart = async () => {
