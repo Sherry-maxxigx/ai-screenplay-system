@@ -509,12 +509,17 @@ const generateScriptAdvice = async () => {
   }
 }
 
-const finishPipeline = () => {
+const finishPipeline = async () => {
   globalState.scriptContent = cleanGeneratedText(script.value)
   ElMessage.success('剧本已整理完成，正在进入高级编辑器。')
-  setTimeout(() => {
-    router.push('/editor')
-  }, 500)
+
+  try {
+    await router.push({ name: 'Editor' })
+  } catch (error) {
+    console.error(error)
+    const base = import.meta.env.BASE_URL || '/'
+    window.location.href = `${base}#/editor`
+  }
 }
 </script>
 
