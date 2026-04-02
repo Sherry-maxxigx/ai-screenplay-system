@@ -10,7 +10,7 @@ const routes = [
   { path: "/settings", name: "Settings", component: () => import("./views/SettingsView.vue"), meta: { requiresAuth: true } },
 ]
 
-const router = createRouter({ history: createWebHashHistory(import.meta.env.BASE_URL), routes })
+const router = createRouter({ history: createWebHashHistory(), routes })
 
 router.beforeEach((to) => {
   if (to.meta.requiresAuth && !isAuthenticated()) {
