@@ -4,6 +4,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 
+from app.api.ai import enforce_script_labels, generate_clean_content
 from app.core.narrative_engine import NarrativeGenerator
 from app.models.neo4j_db import neo4j_client
 
@@ -64,10 +65,12 @@ def _extract_primary_character(text: str) -> str:
     for name in names:
         if name not in blocked:
             return name
+
     tokens = re.findall(r"[\u4e00-\u9fff]{2,3}", cleaned)
     for token in tokens:
         if token not in blocked:
             return token
+
     return "主角"
 
 
@@ -168,7 +171,7 @@ def _extract_outline_anchor(outline: str, act_label: str) -> str:
     for idx, line in enumerate(lines):
         if any(key in line for key in keywords):
             anchor_lines = [line]
-            for tail in lines[idx + 1: idx + 4]:
+            for tail in lines[idx + 1 : idx + 4]:
                 if any(mark in tail for mark in ["第一幕", "第二幕", "第三幕", "结局", "高潮"]):
                     break
                 anchor_lines.append(tail)
@@ -177,7 +180,7 @@ def _extract_outline_anchor(outline: str, act_label: str) -> str:
     return lines[0] if lines else ""
 
 
-def _build_next_beat_text(content: str, outline: str = "") -> str:
+def _build_next_beat_prompt(content: str, outline: str, characters: str) -> tuple[str, int, str, int, str, str, str]:
     cleaned = _normalize_script(content)
     current_scene = _extract_latest_scene(cleaned)
     protagonist = _extract_primary_character(cleaned)
@@ -189,52 +192,82 @@ def _build_next_beat_text(content: str, outline: str = "") -> str:
     last_dialogue_hint = _extract_last_dialogue_hint(cleaned)
     outline_anchor = _extract_outline_anchor(outline, act_label)
 
-    partner_lines = [
-        "你现在继续追下去，可能就回不了头。",
-        "这条线索像是故意留给我们的，你确定要踩进去吗？",
-        "如果这一层也是假象，我们就只剩最后一次机会了。",
-        "你有没有发现，所有证据都在把你往同一个方向推。",
-    ]
-    protagonist_lines = [
-        "我不追下去，真相就永远埋在这里。",
-        "既然有人想让我看到这些，那我就看到最后。",
-        "现在停下才是最危险的。",
-        "他在等我做选择，我偏不按他的剧本走。",
-    ]
+    prompt = f"""你是专业中文编剧，请基于“已有正文 + 剧情大纲 + 人物设定”续写“下一个节点（下一场）”。
 
-    partner_line = partner_lines[(beat_index - 1) % len(partner_lines)]
-    protagonist_line = protagonist_lines[(beat_index - 1) % len(protagonist_lines)]
+硬性要求：
+1. 必须严格承接已有正文，不能重写前文，不要重复已经出现的段落。
+2. 必须与剧情大纲当前幕一致：{act_label}。
+3. 只输出“新增这一场”的内容，不要输出解释。
+4. 开头必须依次输出：
+   - {act_label}·第{section_index}节
+   - 第{beat_index}场
+   - {next_scene}
+5. 必须包含：承接上场、动作描述、人物对白。
+6. 人物对白只允许真实角色名，禁止把“承接上场/推进说明”等当成角色名。
 
-    anchor_line = f"大纲锚点：{outline_anchor}" if outline_anchor else "大纲锚点：延续当前幕核心冲突推进。"
+大纲锚点（必须对齐）：
+{outline_anchor or '延续当前幕核心冲突推进'}
 
-    return _normalize_script(
-        f"""{act_label}·第{section_index}节
+人物设定：
+{characters or '沿用现有正文已出现的人物关系'}
+
+上一场关键信息：
+- 上一场场景：{current_scene}
+- 关键对白：{last_dialogue_hint}
+- 关键线索：{prop}
+- 节奏推进建议：{progression_hint}
+
+已有正文（供承接，不要重复）：
+{cleaned[-2200:]}
+"""
+
+    return prompt, beat_index, act_label, section_index, next_scene, current_scene, outline_anchor
+
+
+def _build_next_beat_text(content: str, outline: str = "", characters: str = "") -> str:
+    prompt, beat_index, act_label, section_index, next_scene, current_scene, outline_anchor = _build_next_beat_prompt(
+        content, outline, characters
+    )
+
+    try:
+        generated, _ = generate_clean_content(prompt, max_tokens=1800)
+        generated = enforce_script_labels(generated)
+        normalized = _normalize_script(generated)
+
+        if f"第{beat_index}场" not in normalized:
+            normalized = _normalize_script(
+                f"""{act_label}·第{section_index}节
 第{beat_index}场
 {next_scene}
 
 承接上场
 上一场位于：{current_scene}
-关键对白：{last_dialogue_hint}
-{anchor_line}
+大纲锚点：{outline_anchor or '延续当前幕核心冲突推进'}
 
-风声逼近，空间里的警报声比刚才更清晰。{protagonist}顺着上一场留下的异常痕迹继续推进，在新的区域里发现与“{prop}”相关的第二层线索，事件从回忆追查转入现实对抗。
+{normalized}
+"""
+            )
+
+        return normalized
+    except Exception:
+        # 最低兜底：仍可用，但优先走真实AI续写
+        protagonist = _extract_primary_character(content)
+        return _normalize_script(
+            f"""{act_label}·第{section_index}节
+第{beat_index}场
+{next_scene}
+
+承接上场
+上一场位于：{current_scene}
+大纲锚点：{outline_anchor or '延续当前幕核心冲突推进'}
 
 动作描述
-{protagonist}停下脚步，借着忽明忽暗的灯光检查眼前装置。屏幕跳出一串新的时间戳，与此前记录形成矛盾闭环，说明有人在实时篡改信息流。
-
-推进说明
-{progression_hint}
+{protagonist}沿着上一场留下的线索继续推进，新的证据与当前幕目标形成直接冲突，剧情向下一节点收束。
 
 {protagonist}
-{protagonist_line}
-
-同伴
-{partner_line}
-
-{protagonist}
-已经来不及了。真正的问题，是里面还有谁在等我们。
+我已经知道下一步该去哪了。
 """
-    )
+        )
 
 
 @router.post("/plan")
@@ -267,7 +300,7 @@ async def generate_scene(scene_req: dict[str, Any] = Body(...)):
 
         verify_result = await narrative_gen.narrative_verify(scene_content, rules)
 
-        if verify_result["is_valid"]:
+        if verify_result.get("is_valid"):
             await narrative_gen.narrative_update(verify_result, graph_db=None)
             return {
                 "status": "success",
@@ -313,7 +346,7 @@ async def generate_next_beat(req: BeatRequest):
     if not content:
         raise HTTPException(status_code=400, detail="当前剧本文本为空，无法生成下一节拍")
 
-    next_beat = _build_next_beat_text(content, outline=req.outline or "")
+    next_beat = _build_next_beat_text(content, outline=req.outline or "", characters=req.characters or "")
     merged = _normalize_script(f"{content}\n\n{next_beat}")
     graph_data = neo4j_client.simulate_function_call_update(merged)
 
