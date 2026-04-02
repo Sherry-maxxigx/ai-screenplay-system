@@ -91,28 +91,86 @@ def _infer_next_scene_title(current_scene: str, beat_index: int) -> str:
     return "内景 临时控制室 夜"
 
 
+def _extract_next_beat_index(text: str) -> int:
+    arabic_hits = [int(item) for item in re.findall(r"第\s*(\d+)\s*场", text)]
+    if arabic_hits:
+        return max(arabic_hits) + 1
+
+    chinese_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    chinese_hits = []
+    for item in re.findall(r"第\s*([一二三四五六七八九十])\s*场", text):
+        if item in chinese_map:
+            chinese_hits.append(chinese_map[item])
+
+    if chinese_hits:
+        return max(chinese_hits) + 1
+
+    return len(re.findall(r"^(内景|外景)", text, flags=re.MULTILINE)) + 1
+
+
+def _build_progression_hint(beat_index: int) -> str:
+    hints = [
+        "线索由‘异常现象’升级为‘人为布局’，主角开始怀疑内部有人提前布控。",
+        "主角不再被动调查，转为主动设局试探同伴，人物关系开始出现裂痕。",
+        "旧案与当下危机正式重叠，主角必须在‘保命’和‘揭真相’之间二选一。",
+        "前一场留下的道具被反向利用，推动剧情进入不可逆阶段。",
+    ]
+    return hints[(beat_index - 1) % len(hints)]
+
+
 def _build_next_beat_text(content: str) -> str:
     cleaned = _normalize_script(content)
     current_scene = _extract_latest_scene(cleaned)
     protagonist = _extract_primary_character(cleaned)
     prop = _extract_recent_prop(cleaned)
-    beat_index = len(re.findall(r"^(内景|外景)", cleaned, flags=re.MULTILINE)) + 1
+    beat_index = _extract_next_beat_index(cleaned)
     next_scene = _infer_next_scene_title(current_scene, beat_index)
+    progression_hint = _build_progression_hint(beat_index)
+
+    partner_lines = [
+        "你现在继续追下去，可能就回不了头。",
+        "这条线索像是故意留给我们的，你确定要踩进去吗？",
+        "如果这一层也是假象，我们就只剩最后一次机会了。",
+        "你有没有发现，所有证据都在把你往同一个方向推。",
+    ]
+    protagonist_lines = [
+        "我不追下去，真相就永远埋在这里。",
+        "既然有人想让我看到这些，那我就看到最后。",
+        "现在停下才是最危险的。",
+        "他在等我做选择，我偏不按他的剧本走。",
+    ]
+
+    partner_line = partner_lines[(beat_index - 1) % len(partner_lines)]
+    protagonist_line = protagonist_lines[(beat_index - 1) % len(protagonist_lines)]
 
     return _normalize_script(
         f"""第{beat_index}场
 {next_scene}
 
-风声逼近，空间里的警报声比刚才更清晰。{protagonist}顺着上一场留下的异常痕迹继续推进，在新的区域里发现与“{prop}”相关的第二层线索，这让事件不再只是回忆，而是正在发生的现实。
+风声逼近，空间里的警报声比刚才更清晰。{protagonist}顺着上一场留下的异常痕迹继续推进，在新的区域里发现与“{prop}”相关的第二层线索，事件从回忆追查转入现实对抗。
 
 动作描述
-{protagonist}停下脚步，借着忽明忽暗的灯光检查眼前的装置。屏幕上短暂跳出一串新的时间戳，与之前掌握的记录完全对不上。她意识到，有人比她更早一步来到这里，并故意留下了可被发现的痕迹。
+{protagonist}停下脚步，借着忽明忽暗的灯光检查眼前装置。屏幕跳出一串新的时间戳，与此前记录形成矛盾闭环，说明有人在实时篡改信息流。
+
+推进说明
+{progression_hint}
 
 {protagonist}
-这不是求救，这是引我继续往里走。
+{protagonist_line}
 
 同伴
-如果这是陷阱，你现在回头还来得及。
+{partner_line}
 
 {protagonist}
 已经来不及了。真正的问题，是里面还有谁在等我们。
