@@ -6,6 +6,7 @@ import requests
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.rule_engine import NarrativeRuleEngine
 from app.core.runtime_ai_settings import (
     PROVIDER_OPTIONS,
     ensure_runtime_settings_file,
@@ -15,6 +16,7 @@ from app.core.runtime_ai_settings import (
 )
 
 router = APIRouter()
+rule_engine = NarrativeRuleEngine()
 
 
 class RuntimeSettingsUpdateRequest(BaseModel):
@@ -347,6 +349,30 @@ def build_meta(effective: dict[str, Any], mode: str, stage: str, note: Optional[
     return meta
 
 
+def attach_rule_validation(meta: dict[str, Any], validation: dict[str, Any], corrected: bool = False):
+    meta["rule_validation"] = {
+        "is_valid": validation["is_valid"],
+        "hard_errors": validation["hard_errors"],
+        "soft_warnings": validation["soft_warnings"],
+        "metrics": validation["metrics"],
+        "corrected": corrected,
+    }
+    return meta
+
+
+def build_correction_prompt(base_prompt: str, hard_errors: list[dict[str, str]]) -> str:
+    fix_lines = [f"- {item.get('fix_instruction', '')}" for item in hard_errors if item.get("fix_instruction")]
+    if not fix_lines:
+        return base_prompt
+
+    return (
+        f"{base_prompt}\n\n"
+        "请执行以下强制合规修正（必须全部满足）：\n"
+        f"{'\n'.join(fix_lines)}\n"
+        "输出最终修正版，不要解释。"
+    )
+
+
 def build_characters_prompt(idea: str) -> str:
     return f"""你是一名专业中文电影编剧策划。
 请根据下面的核心设定，输出纯中文的人物设定。
@@ -495,50 +521,125 @@ def analyze_plot(script: str, model: Optional[str] = None):
 
 @router.post("/narrative/characters")
 def generate_characters_api(req: CharacterRequest):
+    prompt = build_characters_prompt(req.idea)
     try:
         content, effective = generate_clean_content(
-            build_characters_prompt(req.idea),
+            prompt,
             max_tokens=2200,
         )
-        return {"characters": content, "meta": build_meta(effective, "model", "characters")}
+        validation = rule_engine.evaluate(content, stage="characters", idea=req.idea)
+        corrected = False
+
+        if not validation["is_valid"]:
+            corrected_prompt = build_correction_prompt(prompt, validation["hard_errors"])
+            content, effective = generate_clean_content(corrected_prompt, max_tokens=2200)
+            validation = rule_engine.evaluate(content, stage="characters", idea=req.idea)
+            corrected = True
+
+        meta = build_meta(effective, "model", "characters")
+        attach_rule_validation(meta, validation, corrected=corrected)
+        return {"characters": content, "meta": meta}
     except Exception as exc:
         effective = get_effective_generation_settings()
         fallback = build_character_fallback(req.idea)
+        fallback_validation = rule_engine.evaluate(fallback, stage="characters", idea=req.idea)
+        meta = build_meta(effective, "fallback", "characters", note=str(exc))
+        attach_rule_validation(meta, fallback_validation, corrected=False)
         return {
             "characters": fallback,
-            "meta": build_meta(effective, "fallback", "characters", note=str(exc)),
+            "meta": meta,
         }
 
 
 @router.post("/narrative/outline")
 def generate_outline_api(req: OutlineRequest):
+    prompt = build_outline_prompt(req.idea, req.characters)
     try:
         content, effective = generate_clean_content(
-            build_outline_prompt(req.idea, req.characters),
+            prompt,
             max_tokens=2600,
         )
-        return {"outline": content, "meta": build_meta(effective, "model", "outline")}
+        validation = rule_engine.evaluate(
+            content,
+            stage="outline",
+            idea=req.idea,
+            characters=req.characters,
+        )
+        corrected = False
+
+        if not validation["is_valid"]:
+            corrected_prompt = build_correction_prompt(prompt, validation["hard_errors"])
+            content, effective = generate_clean_content(corrected_prompt, max_tokens=2600)
+            validation = rule_engine.evaluate(
+                content,
+                stage="outline",
+                idea=req.idea,
+                characters=req.characters,
+            )
+            corrected = True
+
+        meta = build_meta(effective, "model", "outline")
+        attach_rule_validation(meta, validation, corrected=corrected)
+        return {"outline": content, "meta": meta}
     except Exception as exc:
         effective = get_effective_generation_settings()
         fallback = build_outline_fallback(req.idea, req.characters)
+        fallback_validation = rule_engine.evaluate(
+            fallback,
+            stage="outline",
+            idea=req.idea,
+            characters=req.characters,
+        )
+        meta = build_meta(effective, "fallback", "outline", note=str(exc))
+        attach_rule_validation(meta, fallback_validation, corrected=False)
         return {
             "outline": fallback,
-            "meta": build_meta(effective, "fallback", "outline", note=str(exc)),
+            "meta": meta,
         }
 
 
 @router.post("/narrative/script")
 def generate_pipeline_script_api(req: PipelineScriptRequest):
+    prompt = build_script_prompt(req.idea, req.characters, req.outline)
     try:
         content, effective = generate_clean_content(
-            build_script_prompt(req.idea, req.characters, req.outline),
+            prompt,
             max_tokens=3200,
         )
-        return {"script": content, "meta": build_meta(effective, "model", "script")}
+        validation = rule_engine.evaluate(
+            content,
+            stage="script",
+            idea=req.idea,
+            characters=req.characters,
+        )
+        corrected = False
+
+        if not validation["is_valid"]:
+            corrected_prompt = build_correction_prompt(prompt, validation["hard_errors"])
+            content, effective = generate_clean_content(corrected_prompt, max_tokens=3200)
+            validation = rule_engine.evaluate(
+                content,
+                stage="script",
+                idea=req.idea,
+                characters=req.characters,
+            )
+            corrected = True
+
+        meta = build_meta(effective, "model", "script")
+        attach_rule_validation(meta, validation, corrected=corrected)
+        return {"script": content, "meta": meta}
     except Exception as exc:
         effective = get_effective_generation_settings()
         fallback = build_script_fallback(req.idea, req.characters, req.outline)
+        fallback_validation = rule_engine.evaluate(
+            fallback,
+            stage="script",
+            idea=req.idea,
+            characters=req.characters,
+        )
+        meta = build_meta(effective, "fallback", "script", note=str(exc))
+        attach_rule_validation(meta, fallback_validation, corrected=False)
         return {
             "script": fallback,
-            "meta": build_meta(effective, "fallback", "script", note=str(exc)),
+            "meta": meta,
         }

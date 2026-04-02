@@ -75,6 +75,36 @@
           />
         </div>
 
+        <div v-if="lastRuleValidation" class="rule-validation-panel">
+          <div class="rule-head">
+            <h4>叙事规则内生引擎校验结果</h4>
+            <el-tag :type="lastRuleValidation.is_valid ? 'success' : 'danger'" effect="dark" round>
+              {{ lastRuleValidation.is_valid ? '强制合规通过' : '强制合规未通过' }}
+            </el-tag>
+          </div>
+
+          <div class="rule-metrics">
+            <span>强制合规分：{{ lastRuleValidation.metrics?.hard_compliance_score ?? '--' }}</span>
+            <span>创意参考分：{{ lastRuleValidation.metrics?.creative_reference_score ?? '--' }}</span>
+            <span>伏笔回收率：{{ lastRuleValidation.metrics?.foreshadow_recovery_rate ?? '--' }}%</span>
+          </div>
+
+          <el-alert
+            v-if="(lastRuleValidation.hard_errors || []).length"
+            type="error"
+            :closable="false"
+            :title="`硬性问题：${lastRuleValidation.hard_errors[0].description}`"
+            class="rule-alert"
+          />
+          <el-alert
+            v-else-if="(lastRuleValidation.soft_warnings || []).length"
+            type="warning"
+            :closable="false"
+            :title="`创意建议：${lastRuleValidation.soft_warnings[0].description}`"
+            class="rule-alert"
+          />
+        </div>
+
         <div v-show="activeStep === 0" class="step-content">
           <div class="section-head">
             <div>
@@ -279,6 +309,7 @@ const loadingData = ref(false)
 
 const progressValue = ref(0)
 const progressText = ref('')
+const lastRuleValidation = ref(null)
 let progressTimer = null
 
 const stepTitles = ['核心设定', '人物设定', '剧情大纲', '剧本正文']
@@ -369,6 +400,10 @@ const ensureRequirements = () => {
   return text
 }
 
+const syncRuleValidation = (result) => {
+  lastRuleValidation.value = result?.data?.meta?.rule_validation || null
+}
+
 const generateCharacters = async () => {
   const compiled = ensureRequirements()
   if (!hasRequiredFields.value) {
@@ -380,6 +415,7 @@ const generateCharacters = async () => {
   startProgress('正在根据核心设定生成人物设定...')
   try {
     const result = await apiGenerateCharacters(compiled)
+    syncRuleValidation(result)
     characters.value = cleanGeneratedText(result.data.characters)
     stopProgress()
     setTimeout(() => {
@@ -399,6 +435,7 @@ const generateOutline = async () => {
   startProgress('正在根据人物设定生成剧情大纲...')
   try {
     const result = await apiGenerateOutline(compiled, characters.value)
+    syncRuleValidation(result)
     outline.value = cleanGeneratedText(result.data.outline)
     stopProgress()
     setTimeout(() => {
@@ -418,6 +455,7 @@ const generateScript = async () => {
   startProgress('正在根据剧情大纲生成剧本正文...')
   try {
     const result = await generatePipelineScript(compiled, characters.value, outline.value)
+    syncRuleValidation(result)
     script.value = cleanGeneratedText(result.data.script)
     stopProgress()
     setTimeout(() => {
@@ -580,6 +618,40 @@ const finishPipeline = () => {
   border-radius: 20px;
   background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
   border: 1px solid rgba(59, 93, 159, 0.12);
+}
+
+.rule-validation-panel {
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: #f9fbff;
+  border: 1px solid rgba(59, 93, 159, 0.18);
+}
+
+.rule-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.rule-head h4 {
+  margin: 0;
+  font-size: 16px;
+  color: #113661;
+}
+
+.rule-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+  color: #4f6582;
+  font-size: 13px;
+}
+
+.rule-alert {
+  margin-top: 6px;
 }
 
 .progress-meta {
