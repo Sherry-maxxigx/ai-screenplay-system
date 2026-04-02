@@ -285,22 +285,69 @@ def build_script_fallback(idea: str, characters: str, outline: str) -> str:
 剧情方向：
 {outline_seed or "故事从异常事件开始，在调查中持续升级，最终以真相反转收束。"}
 
-第一场
+第一幕·第1节
+第1场
 外景 海边废弃设施 夜
+承接上节：故事开端，建立人物关系与核心冲突。
 
 暴雨压着海面，远处的旧灯塔忽明忽暗，像在黑暗里呼吸。废弃多年后，它突然恢复供电，顶端探照灯缓慢转动，划破海雾。
 
-第二场
+第一幕·第2节
+第2场
 内景 主角公寓 夜
+承接上节：主角从外部异象转入个人危机。
 
 主角独自坐在电脑前，屏幕上跳出一段未知来源的加密讯号。她起初以为这是恶作剧，但随着波形展开，她听见一个本不该再出现的声音。那一刻，她意识到过去没有结束。
 
-第三场
+第一幕·第3节
+第3场
 外景 港口码头 夜
+承接上节：主角做出行动选择，正式进入主线。
 
 主角带着设备赶往码头，与行动团队会合。所有人都知道这不是普通搜救，却没有人愿意先说破。船只离岸时，风浪更大，真正的故事也正式开始。
 """
     )
+
+
+def _act_section_by_scene_index(index: int) -> tuple[str, int]:
+    if index <= 3:
+        return "第一幕", index
+    if index <= 7:
+        return "第二幕", index - 3
+    if index <= 10:
+        return "第三幕", index - 7
+    return "结局", index - 10
+
+
+def enforce_script_labels(text: str) -> str:
+    cleaned = clean_text_output(text)
+    if not cleaned:
+        return cleaned
+
+    if re.search(r"(第一幕|第二幕|第三幕|结局)·第\d+节", cleaned):
+        return cleaned
+
+    lines = [line for line in cleaned.split("\n")]
+    rebuilt: list[str] = []
+    scene_index = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("内景", "外景")):
+            scene_index += 1
+            act_label, section_idx = _act_section_by_scene_index(scene_index)
+            rebuilt.append(f"{act_label}·第{section_idx}节")
+            rebuilt.append(f"第{scene_index}场")
+            rebuilt.append(stripped)
+            if scene_index == 1:
+                rebuilt.append("承接上节：故事开端，建立人物关系与核心冲突。")
+            else:
+                rebuilt.append("承接上节：延续上一场冲突，推动情节升级。")
+            continue
+
+        rebuilt.append(line)
+
+    return clean_text_output("\n".join(rebuilt))
 
 
 def build_general_fallback(prompt: str) -> str:
@@ -613,6 +660,7 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
             prompt,
             max_tokens=3200,
         )
+        content = enforce_script_labels(content)
         validation = rule_engine.evaluate(
             content,
             stage="script",
@@ -624,6 +672,7 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
         if not validation["is_valid"]:
             corrected_prompt = build_correction_prompt(prompt, validation["hard_errors"])
             content, effective = generate_clean_content(corrected_prompt, max_tokens=3200)
+            content = enforce_script_labels(content)
             validation = rule_engine.evaluate(
                 content,
                 stage="script",
@@ -638,6 +687,7 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
     except Exception as exc:
         effective = get_effective_generation_settings()
         fallback = build_script_fallback(req.idea, req.characters, req.outline)
+        fallback = enforce_script_labels(fallback)
         fallback_validation = rule_engine.evaluate(
             fallback,
             stage="script",
