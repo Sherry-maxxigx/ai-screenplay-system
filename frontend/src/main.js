@@ -6,6 +6,11 @@ import 'element-plus/dist/index.css'
 import { createPinia } from 'pinia'
 import router from './router'
 
+if (import.meta.env.PROD && typeof window !== 'undefined' && !window.location.hash) {
+  const current = `${window.location.pathname}${window.location.search}`
+  window.location.replace(`${current}#/login`)
+}
+
 const RUNTIME_API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'https://ai-screenplay-system.onrender.com/api' : '/api')
 const API_HOST_BASE = RUNTIME_API_BASE.replace(/\/api\/?$/, '')
 
