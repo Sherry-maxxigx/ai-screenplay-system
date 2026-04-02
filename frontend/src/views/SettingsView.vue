@@ -227,6 +227,7 @@ import { getRuntimeAISettings, saveRuntimeAISettings } from '../api/ai'
 const loading = ref(false)
 const saving = ref(false)
 const saveMessage = ref('')
+const SETTINGS_CACHE_KEY = 'runtime_settings_cache_v1'
 
 const form = reactive({
   modelBase: 'zhipu',
@@ -312,6 +313,28 @@ function applySettings(data) {
   maskedKeys.openai_api_key = data.masked_keys?.openai_api_key || ''
   maskedKeys.deepseek_api_key = data.masked_keys?.deepseek_api_key || ''
 
+  localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify({
+    model_base: form.modelBase,
+    zhipu_model: form.zhipuModel,
+    openai_model: form.openaiModel,
+    deepseek_model: form.deepseekModel,
+    temperature: form.temperature,
+    top_p: form.topP,
+    safety_provider: form.safetyProvider,
+    provider_options: providerOptions.value,
+    safety_options: safetyOptions.value,
+    key_status: {
+      zhipu_configured: keyStatus.zhipu_configured,
+      openai_configured: keyStatus.openai_configured,
+      deepseek_configured: keyStatus.deepseek_configured,
+    },
+    masked_keys: {
+      zhipu_api_key: maskedKeys.zhipu_api_key,
+      openai_api_key: maskedKeys.openai_api_key,
+      deepseek_api_key: maskedKeys.deepseek_api_key,
+    },
+  }))
+
   clearPendingKeys()
 }
 
@@ -344,7 +367,17 @@ async function loadSettings() {
     applySettings(data)
   } catch (error) {
     console.error(error)
-    ElMessage.error('读取运行时配置失败')
+    const cached = localStorage.getItem(SETTINGS_CACHE_KEY)
+    if (cached) {
+      try {
+        applySettings(JSON.parse(cached))
+        ElMessage.warning('后端暂时不可达，已显示上次缓存配置。')
+      } catch {
+        ElMessage.error('读取运行时配置失败')
+      }
+    } else {
+      ElMessage.error('读取运行时配置失败')
+    }
   } finally {
     loading.value = false
   }
