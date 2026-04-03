@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, Optional
 
@@ -10,6 +11,69 @@ from app.models.neo4j_db import neo4j_client
 
 router = APIRouter()
 narrative_gen = NarrativeGenerator()
+
+ENDING_KEYWORDS = [
+    "结局",
+    "结尾",
+    "尾声",
+    "余韵",
+    "真相",
+    "揭晓",
+    "落幕",
+    "收束",
+    "结束",
+    "终于",
+    "最后",
+    "清晨",
+    "天亮",
+    "告别",
+    "代价",
+    "选择",
+]
+
+FORESHADOW_KEYWORDS = [
+    "怀表",
+    "录音",
+    "旧照片",
+    "坐标",
+    "钥匙",
+    "求救信号",
+    "日志",
+    "芯片",
+    "信号",
+    "手机",
+    "门禁卡",
+    "纸条",
+    "录像",
+    "档案",
+    "U盘",
+]
+
+OUTLINE_STOPWORDS = {
+    "第一幕",
+    "第二幕",
+    "第三幕",
+    "结局",
+    "结尾",
+    "高潮",
+    "余韵",
+    "场景",
+    "剧情",
+    "故事",
+    "主角",
+    "角色",
+    "人物",
+    "冲突",
+    "推进",
+    "发展",
+    "收束",
+    "完成",
+    "最终",
+    "开始",
+    "因为",
+    "所以",
+    "以及",
+}
 
 
 def _build_requirement_text(requirements: dict[str, Any]) -> str:
@@ -178,6 +242,207 @@ def _extract_outline_anchor(outline: str, act_label: str) -> str:
             return "；".join(anchor_lines)
 
     return lines[0] if lines else ""
+
+
+def _extract_scene_count(text: str) -> int:
+    cleaned = _normalize_script(text)
+    numbered_scenes = re.findall(r"^第\s*[一二三四五六七八九十百零\d]+\s*场", cleaned, flags=re.MULTILINE)
+    if numbered_scenes:
+        return len(numbered_scenes)
+    return len(re.findall(r"^(内景|外景)", cleaned, flags=re.MULTILINE))
+
+
+def _extract_outline_focus_points(outline: str, limit: int = 6) -> list[str]:
+    text = _normalize_script(outline)
+    if not text:
+        return []
+
+    prioritized: list[str] = []
+    regular: list[str] = []
+    for raw_line in text.split("\n"):
+        line = re.sub(r"^[\-\*\d\.\s]+", "", raw_line).strip("：:；; ")
+        if not line:
+            continue
+        target_bucket = prioritized if any(keyword in line for keyword in ENDING_KEYWORDS) else regular
+        if line not in target_bucket:
+            target_bucket.append(line)
+
+    return (prioritized + regular)[:limit]
+
+
+def _extract_focus_keywords(text: str, limit: int = 10) -> list[str]:
+    hits: list[str] = []
+    for token in re.findall(r"[\u4e00-\u9fff]{2,6}", text or ""):
+        if token in OUTLINE_STOPWORDS:
+            continue
+        if token not in hits:
+            hits.append(token)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _parse_json_object(raw_text: str) -> Optional[dict[str, Any]]:
+    if not raw_text:
+        return None
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        parsed = json.loads(raw_text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
+    cleaned = _normalize_script(content)
+    outline_points = _extract_outline_focus_points(outline)
+    scene_count = _extract_scene_count(cleaned)
+    tail = cleaned[-1800:]
+
+    matched_points: list[str] = []
+    missing_points: list[str] = []
+    for point in outline_points:
+        keywords = _extract_focus_keywords(point, limit=4)
+        if keywords and any(keyword in cleaned for keyword in keywords):
+            matched_points.append(point)
+        elif point:
+            missing_points.append(point)
+
+    outline_coverage = round(len(matched_points) / len(outline_points), 2) if outline_points else 0.0
+
+    resolved_threads: list[str] = []
+    dangling_threads: list[str] = []
+    for keyword in FORESHADOW_KEYWORDS:
+        occurrences = len(re.findall(re.escape(keyword), cleaned))
+        if occurrences == 0:
+            continue
+        if keyword in tail:
+            resolved_threads.append(keyword)
+        elif occurrences == 1:
+            dangling_threads.append(keyword)
+
+    ending_reached = any(keyword in tail for keyword in ENDING_KEYWORDS)
+    minimum_scenes = 6 if not outline_points else min(10, max(6, len(outline_points) + 2))
+    is_complete = (
+        scene_count >= minimum_scenes
+        and ending_reached
+        and (not outline_points or outline_coverage >= 0.75)
+        and not dangling_threads
+    )
+
+    if is_complete:
+        reason = "当前剧本已经覆盖大纲主体内容，并且结尾段落完成了收束。"
+    elif missing_points:
+        reason = f"仍有大纲内容未充分落地：{missing_points[0]}"
+    elif dangling_threads:
+        reason = f"仍有关键伏笔没有明显回收：{dangling_threads[0]}"
+    elif not ending_reached:
+        reason = "当前文本还没有进入明确的结尾收束段落。"
+    else:
+        reason = "当前剧本还在推进阶段，尚未达到自动完结条件。"
+
+    return {
+        "is_complete": is_complete,
+        "reason": reason,
+        "scene_count": scene_count,
+        "ending_reached": ending_reached,
+        "outline_coverage": outline_coverage,
+        "matched_points": matched_points[:6],
+        "missing_points": missing_points[:6],
+        "resolved_threads": resolved_threads[:6],
+        "dangling_threads": dangling_threads[:6],
+        "can_continue": not is_complete,
+        "source": "fallback",
+    }
+
+
+def _assess_completion_with_model(content: str, outline: str) -> Optional[dict[str, Any]]:
+    if not outline.strip() or len(content.strip()) < 600:
+        return None
+
+    prompt = f"""你是剧本完结检查器。请根据“剧情大纲”和“当前剧本正文”判断这部剧本是否已经完整讲完，并且主要伏笔是否已经回收。
+
+判断标准：
+1. 必须已经写到结尾，不是停在中段。
+2. 必须基本覆盖大纲要求，不能还有核心剧情点没写。
+3. 主要伏笔和关键线索不能明显悬空。
+4. 如果已经完整收束，则 is_complete 必须为 true；否则必须为 false。
+
+只输出严格 JSON，不要附加任何解释。格式如下：
+{{
+  "is_complete": true,
+  "reason": "一句中文说明",
+  "missing_points": ["如果没有就返回空数组"],
+  "resolved_threads": ["已回收的关键伏笔或线索"],
+  "ending_reached": true
+}}
+
+剧情大纲：
+{outline}
+
+当前剧本正文：
+{content[-5000:]}
+"""
+
+    raw, _ = generate_clean_content(prompt, max_tokens=500)
+    parsed = _parse_json_object(raw)
+    if not parsed:
+        return None
+
+    return {
+        "is_complete": bool(parsed.get("is_complete")),
+        "reason": str(parsed.get("reason") or "").strip(),
+        "missing_points": [str(item).strip() for item in (parsed.get("missing_points") or []) if str(item).strip()],
+        "resolved_threads": [str(item).strip() for item in (parsed.get("resolved_threads") or []) if str(item).strip()],
+        "ending_reached": bool(parsed.get("ending_reached")),
+    }
+
+
+def _evaluate_script_completion(content: str, outline: str) -> dict[str, Any]:
+    fallback = _build_completion_fallback(content, outline)
+
+    try:
+        assessment = _assess_completion_with_model(content, outline)
+    except Exception:
+        assessment = None
+
+    if not assessment:
+        return fallback
+
+    missing_points: list[str] = []
+    for item in assessment.get("missing_points", []) + fallback.get("missing_points", []):
+        if item and item not in missing_points:
+            missing_points.append(item)
+
+    resolved_threads: list[str] = []
+    for item in assessment.get("resolved_threads", []) + fallback.get("resolved_threads", []):
+        if item and item not in resolved_threads:
+            resolved_threads.append(item)
+
+    model_complete = bool(assessment.get("is_complete"))
+    fallback_complete = bool(
+        fallback.get("ending_reached")
+        and fallback.get("scene_count", 0) >= 6
+        and fallback.get("outline_coverage", 0) >= 0.5
+    )
+    is_complete = model_complete and fallback_complete and not missing_points and not fallback.get("dangling_threads")
+
+    return {
+        **fallback,
+        "is_complete": is_complete,
+        "reason": assessment.get("reason") or fallback.get("reason"),
+        "missing_points": missing_points[:6],
+        "resolved_threads": resolved_threads[:6],
+        "ending_reached": bool(assessment.get("ending_reached") or fallback.get("ending_reached")),
+        "can_continue": not is_complete,
+        "source": "model+fallback",
+    }
 
 
 def _build_next_beat_prompt(content: str, outline: str, characters: str) -> tuple[str, int, str, int, str, str, str]:
