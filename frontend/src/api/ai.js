@@ -1,7 +1,7 @@
 
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'https://ai-screenplay-system.onrender.com/api' : '/api')
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -22,8 +22,13 @@ export const generateOutline = async (idea, characters) => {
 }
 
 // Generate Script
-export const generatePipelineScript = async (idea, characters, outline) => {
-  return await apiClient.post('/ai/narrative/script', { idea, characters, outline })
+export const generatePipelineScript = async (idea, characters, outline, currentScene = 1) => {
+  return await apiClient.post('/ai/narrative/script', { 
+    idea, 
+    characters, 
+    outline, 
+    current_scene: currentScene,
+  })
 }
 
 export const getRuntimeAISettings = async () => {
@@ -37,4 +42,3 @@ export const saveRuntimeAISettings = async (payload) => {
 export const analyzePlotWithAdvice = async (script, model) => {
   return await apiClient.post('/ai/analyze-plot', { script, model })
 }
-

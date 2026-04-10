@@ -46,11 +46,12 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElForm, ElFormItem, ElInput, ElCheckbox, ElButton } from 'element-plus'
 import { loginAPI, registerAPI } from '../api/auth'
-import { loginSuccess } from '../stores/auth'
+import { loginSuccess, logout } from '../stores/auth'
+import { resetProjectWorkspace } from '../stores/project'
 
 const router = useRouter()
 const route = useRoute()
@@ -75,6 +76,13 @@ const rules = {
 const switchMode = () => {
   mode.value = mode.value === 'login' ? 'register' : 'login'
 }
+
+onMounted(() => {
+  if (route.query.fresh === '1') {
+    logout()
+    resetProjectWorkspace()
+  }
+})
 
 const submit = async () => {
   const valid = await formRef.value?.validate().catch(() => false)

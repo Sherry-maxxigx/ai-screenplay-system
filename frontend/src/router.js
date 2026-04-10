@@ -17,10 +17,6 @@ router.beforeEach((to) => {
     return { name: 'Login', query: { redirect: to.fullPath } }
   }
 
-  if (to.name === 'Login' && isAuthenticated()) {
-    return { name: 'Pipeline' }
-  }
-
   return true
 })
 

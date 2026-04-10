@@ -64,6 +64,7 @@ class PipelineScriptRequest(BaseModel):
     idea: str = Field(min_length=1)
     characters: str = ""
     outline: str = ""
+    current_scene: int = 1
 
 
 SAFETY_PATTERNS = {
@@ -458,9 +459,15 @@ def build_outline_prompt(idea: str, characters: str) -> str:
 """
 
 
-def build_script_prompt(idea: str, characters: str, outline: str) -> str:
+def build_script_prompt(idea: str, characters: str, outline: str, current_scene: int = 1) -> str:
+    stage_hint = (
+        "请从故事开端写起，直接生成可继续续写的开篇 2 到 3 场。"
+        if current_scene <= 1
+        else f"当前已经写到第 {max(1, current_scene - 1)} 场，请继续往后写新的 1 到 2 场，不要重复前文。"
+    )
+
     return f"""你是一名专业中文电影编剧。
-请根据以下资料，直接输出剧本前几场的正文内容。
+请根据以下资料，直接输出一段可继续接力创作的剧本正文。
 
 要求：
 1. 只输出中文，不要使用 Markdown，不要出现星号、井号、代码块。
@@ -469,7 +476,14 @@ def build_script_prompt(idea: str, characters: str, outline: str) -> str:
 4. 场次标题使用中文，例如“外景 港口 夜”或“内景 公寓 夜”。
 5. 每场必须写“承接上节：xxx”，说明与上一场如何衔接，避免跳场。
 6. 人物对白自然，动作描写具体，悬念感明确。
-7. 输出至少三场戏，确保可以直接在编辑器里继续改写。
+7. 不要预设固定总场次，不要写“第15场才结束”这类外部规划，是否收束只由剧情大纲决定。
+8. 严格按照剧情大纲的先后顺序推进，不要重复已经发生过的信息或场景。
+9. 不要把大纲逐句改写成摘要，要把每一场写成真正发生的戏：人物有目标、阻力、动作和结果。
+10. 当前这次只写需要落地的开篇几场，优先把第一幕前两个关键节点写扎实，不要一上来就把后面的大纲匆忙写碎。
+
+当前进度：
+- 当前场次：第 {current_scene} 场
+- 写作任务：{stage_hint}
 
 核心设定：
 {idea}
@@ -480,6 +494,37 @@ def build_script_prompt(idea: str, characters: str, outline: str) -> str:
 剧情大纲：
 {outline}
 """
+
+
+def _generate_outline_aligned_opening(
+    outline: str,
+    characters: str,
+    current_scene: int = 1,
+) -> Optional[dict[str, Any]]:
+    cleaned_outline = clean_text_output(outline)
+    if not cleaned_outline:
+        return None
+
+    from app.api import narrative as narrative_api
+
+    beats_to_generate = 3 if current_scene <= 1 else 2
+    generation = narrative_api._generate_outline_aligned_beats(
+        "",
+        outline=cleaned_outline,
+        characters=characters,
+        max_beats=beats_to_generate,
+    )
+    script = narrative_api._normalize_script(generation.get("merged_content") or generation.get("text") or "")
+    if not script:
+        return None
+
+    completion = generation.get("completion") or narrative_api._evaluate_script_completion(script, cleaned_outline)
+    return {
+        "script": enforce_script_labels(script),
+        "completion": completion,
+        "generation_mode": "outline_aligned_sequence",
+        "generated_scene_count": generation.get("generated_count", 0),
+    }
 
 
 @router.get("/runtime-settings")
@@ -557,20 +602,189 @@ def generate_script(prompt: str, model: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def extract_suggestions_from_text(text, script_content):
+    import re
+    suggestions = []
+    
+    lines = script_content.strip().split('\n')
+    
+    pattern = r'(\d+)[、.．]\s*(.+?)(?:[:：]\s*)(.+?)(?:。|$)'
+    matches = re.findall(pattern, text)
+    
+    for i, match in enumerate(matches[:5]):
+        raw_type, desc = match[1], match[2]
+        
+        type_map = {
+            '冲突': '冲突优化', '矛盾': '冲突优化',
+            '人物': '人物动机', '动机': '人物动机', '角色': '人物动机',
+            '伏笔': '伏笔埋设', '铺垫': '伏笔埋设',
+            '结构': '结构调整', '节奏': '结构调整',
+            '对白': '对白优化', '对话': '对白优化', '台词': '对白优化',
+        }
+        
+        sug_type = '结构调整'
+        for k, v in type_map.items():
+            if k in raw_type or k in desc:
+                sug_type = v
+                break
+        
+        line_idx = min(i * 3 + 2, len(lines) - 1)
+        
+        suggestions.append({
+            "id": i + 1,
+            "type": sug_type,
+            "description": desc[:80],
+            "before": lines[line_idx] if line_idx < len(lines) else lines[-1],
+            "after": f"【优化】{lines[line_idx] if line_idx < len(lines) else ''}（点击按钮自动优化）",
+            "confidence": 0.8
+        })
+    
+    return suggestions
+
+
+def build_plot_advice_fallback(script: str) -> dict[str, Any]:
+    cleaned = clean_text_output(script)
+    lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+
+    if not lines:
+        return {
+            "analysis": "当前文本为空，建议先生成人物、大纲或剧本内容后再进行分析。",
+            "suggestions": [],
+        }
+
+    total_lines = len(lines)
+    scene_like_lines = [line for line in lines if line.startswith(("第", "内景", "外景", "第一幕", "第二幕", "第三幕"))]
+
+    def pick_line(index: int) -> str:
+        if not lines:
+            return ""
+        index = max(0, min(index, len(lines) - 1))
+        return lines[index]
+
+    suggestions = []
+    preset = [
+        (
+            "结构调整",
+            "建议在前 1/3 位置补一个更强的转折点，让主角更早做出不可逆选择。",
+            1,
+            "【结构优化】这一段之后插入一个更明确的外部事件，迫使主角立刻行动。",
+        ),
+        (
+            "人物动机",
+            "可以把主角的目标、代价和恐惧再写得更明确，后续冲突会更有牵引力。",
+            total_lines // 2,
+            "【人物强化】补出主角此刻最害怕失去的东西，并让行动目标更具体。",
+        ),
+        (
+            "冲突优化",
+            "建议在后半段增加一次正面碰撞或信息反转，避免推进过于平缓。",
+            max(total_lines - 2, 0),
+            "【冲突升级】在这里加入一次关键对抗或真相揭露，让剧情压强明显抬升。",
+        ),
+    ]
+
+    for idx, (s_type, description, line_index, after_tip) in enumerate(preset, start=1):
+        before = pick_line(line_index)
+        if not before:
+            continue
+        suggestions.append(
+            {
+                "id": idx,
+                "type": s_type,
+                "description": description,
+                "before": before,
+                "after": f"{before}\n{after_tip}",
+                "confidence": 0.78,
+            }
+        )
+
+    summary = (
+        f"当前文本共 {total_lines} 行，可识别到 {len(scene_like_lines)} 处结构节点。"
+        "已返回系统兜底建议，可直接一键应用后继续改写。"
+    )
+
+    return {
+        "analysis": summary,
+        "suggestions": suggestions,
+    }
+
+
 @router.post("/analyze-plot")
 def analyze_plot(request: AnalyzePlotRequest):
     try:
-        analyze_prompt = (
-            "请用中文分析下面剧本的主要冲突、人物动机、伏笔和可能的结构问题。"
-            "只输出中文，不要使用 Markdown，不要出现星号或代码块。\n\n"
-            f"{request.script}"
-        )
-        content, effective = generate_clean_content(analyze_prompt, model=request.model, max_tokens=2500)
-        return {"analysis": content, "meta": build_meta(effective, "model", "analyze_plot")}
+        analyze_prompt = f"""
+你是专业的剧本编审。
+
+!!! 最重要的规则：你必须输出合法的JSON格式，其他任何文字都不要写！!!!
+
+输出要求：
+1. 第一字符必须是左大括号，最后一个字符必须是右大括号
+2. 绝对不能写任何解释、说明文字
+3. 绝对不能写```json或者任何代码标记
+4. 找出剧本的3-5个具体修改点
+
+每条建议必须包含：
+- type: 只能是【冲突优化、人物动机、伏笔埋设、结构调整、对白优化】五选一
+- description: 详细说明为什么要改
+- before: 原文中的完整一行，必须能搜索到
+- after: 修改后的完整文本
+
+严格按照下面的JSON格式输出：
+{{
+  "summary": "剧本整体分析总结",
+  "suggestions": [
+    {{
+      "id": 1,
+      "type": "冲突优化",
+      "description": "这里冲突不够强烈，建议加强戏剧张力",
+      "before": "林默看着窗外没有说话",
+      "after": "林默指尖深深掐进掌心，指缝渗出鲜血却浑然不觉",
+      "confidence": 0.95
+    }}
+  ]
+}}
+
+剧本内容：
+{request.script}
+"""
+        content, effective = generate_clean_content(analyze_prompt, model=request.model, max_tokens=3000)
+        
+        try:
+            import json
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            json_str = content[start:end]
+            result = json.loads(json_str)
+            
+            suggestions = result.get("suggestions", [])
+            if not suggestions:
+                suggestions = extract_suggestions_from_text(content, request.script)
+                
+            return {
+                "analysis": result.get("summary", content[:200]),
+                "suggestions": suggestions,
+                "raw_text": content,
+                "meta": build_meta(effective, "model", "analyze_plot")
+            }
+        except Exception as e:
+            fallback_suggestions = extract_suggestions_from_text(content, request.script)
+            
+            return {
+                "analysis": content,
+                "suggestions": fallback_suggestions,
+                "meta": build_meta(effective, "model", "analyze_plot")
+            }
+            
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        fallback = build_plot_advice_fallback(request.script)
+        effective = get_effective_generation_settings({"model": request.model})
+        return {
+            "analysis": fallback["analysis"],
+            "suggestions": fallback["suggestions"],
+            "meta": build_meta(effective, "fallback", "analyze_plot", note=str(exc)),
+        }
 
 
 @router.post("/narrative/characters")
@@ -654,22 +868,32 @@ def generate_outline_api(req: OutlineRequest):
 
 @router.post("/narrative/script")
 def generate_pipeline_script_api(req: PipelineScriptRequest):
-    prompt = build_script_prompt(req.idea, req.characters, req.outline)
+    prompt = build_script_prompt(req.idea, req.characters, req.outline, req.current_scene)
     try:
-        content, effective = generate_clean_content(
-            prompt,
-            max_tokens=3200,
-        )
-        content = enforce_script_labels(content)
+        effective = get_effective_generation_settings()
+        content = ""
+        completion = None
+        corrected = False
+        opening_result = _generate_outline_aligned_opening(req.outline, req.characters, req.current_scene)
+
+        if opening_result:
+            content = opening_result["script"]
+            completion = opening_result.get("completion")
+        else:
+            content, effective = generate_clean_content(
+                prompt,
+                max_tokens=3200,
+            )
+            content = enforce_script_labels(content)
+
         validation = rule_engine.evaluate(
             content,
             stage="script",
             idea=req.idea,
             characters=req.characters,
         )
-        corrected = False
 
-        if not validation["is_valid"]:
+        if not validation["is_valid"] and not opening_result:
             corrected_prompt = build_correction_prompt(prompt, validation["hard_errors"])
             content, effective = generate_clean_content(corrected_prompt, max_tokens=3200)
             content = enforce_script_labels(content)
@@ -681,9 +905,24 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
             )
             corrected = True
 
+        if completion is None and req.outline.strip():
+            from app.api import narrative as narrative_api
+
+            completion = narrative_api._evaluate_script_completion(content, req.outline)
+
         meta = build_meta(effective, "model", "script")
+        meta["generation_mode"] = (
+            opening_result.get("generation_mode", "prompt_generation") if opening_result else "prompt_generation"
+        )
+        if opening_result and opening_result.get("generated_scene_count"):
+            meta["generated_scene_count"] = opening_result["generated_scene_count"]
         attach_rule_validation(meta, validation, corrected=corrected)
-        return {"script": content, "meta": meta}
+        return {
+            "script": content,
+            "meta": meta,
+            "completion": completion,
+            "is_end": bool(completion.get("is_complete")) if completion else False,
+        }
     except Exception as exc:
         effective = get_effective_generation_settings()
         fallback = build_script_fallback(req.idea, req.characters, req.outline)
@@ -699,4 +938,6 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
         return {
             "script": fallback,
             "meta": meta,
+            "completion": None,
+            "is_end": False,
         }

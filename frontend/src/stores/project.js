@@ -1,6 +1,142 @@
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 
-export const globalState = reactive({
+const AUTOSAVE_KEY = 'AI_SCREENPLAY_VERSIONS_V2'
+const MANUAL_SAVE_KEY = 'AI_SCREENPLAY_MANUAL_VERSIONS'
+const AUTOSAVE_DEBOUNCE_MS = 5 * 60 * 1000
+const MAX_VERSIONS = 15
+const MAX_MANUAL_VERSIONS = 3
+
+function sanitizeStateData(data = {}) {
+  if (!data || typeof data !== 'object') return {}
+  const next = { ...data }
+  delete next.pipelineTotalScenes
+  return next
+}
+
+function sanitizeHistoryPayload(history) {
+  if (!history || typeof history !== 'object') {
+    return { currentVersionId: null, versions: [] }
+  }
+
+  return {
+    ...history,
+    versions: Array.isArray(history.versions)
+      ? history.versions.map((version) => ({
+          ...version,
+          data: sanitizeStateData(version?.data || {}),
+        }))
+      : [],
+  }
+}
+
+function loadVersionHistory() {
+  try {
+    const saved = localStorage.getItem(AUTOSAVE_KEY)
+    if (saved) {
+      const history = sanitizeHistoryPayload(JSON.parse(saved))
+      return history
+    }
+  } catch (e) {
+    console.warn('⚠️ 存档损坏，使用默认值')
+  }
+  return {
+    currentVersionId: null,
+    versions: [],
+  }
+}
+
+function extractStateData() {
+  return {
+    scriptContent: globalState.scriptContent,
+    pipelineCharacters: globalState.pipelineCharacters,
+    pipelineOutline: globalState.pipelineOutline,
+    pipelineThemeInput: globalState.pipelineThemeInput,
+    pipelineSettingInput: globalState.pipelineSettingInput,
+    pipelineProtagonistInput: globalState.pipelineProtagonistInput,
+    pipelineConflictInput: globalState.pipelineConflictInput,
+    pipelineStyleInput: globalState.pipelineStyleInput,
+    pipelineEndingInput: globalState.pipelineEndingInput,
+    pipelineExtraInput: globalState.pipelineExtraInput,
+    pipelineActiveStep: globalState.pipelineActiveStep,
+    pipelineCurrentScene: globalState.pipelineCurrentScene,
+    pipelineIsScriptEnd: globalState.pipelineIsScriptEnd,
+    pipelineCompletionReason: globalState.pipelineCompletionReason,
+  }
+}
+
+function createNewVersion() {
+  const history = loadVersionHistory()
+  const currentData = extractStateData()
+
+  if (history.versions.length > 0) {
+    const lastData = history.versions[0].data
+    if (JSON.stringify(currentData) === JSON.stringify(lastData)) {
+      return
+    }
+  }
+
+  const newVersion = {
+    id: Date.now(),
+    savedAt: Date.now(),
+    savedAtReadable: new Date().toLocaleString('zh-CN'),
+    data: currentData,
+  }
+
+  history.versions.unshift(newVersion)
+  history.currentVersionId = newVersion.id
+
+  if (history.versions.length > MAX_VERSIONS) {
+    history.versions = history.versions.slice(0, MAX_VERSIONS)
+  }
+
+  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(history))
+  console.log(`💾 已自动保存新版本 #${history.versions.length}/${MAX_VERSIONS}，${newVersion.savedAtReadable}（每5分钟自动保存一次）`)
+  return newVersion
+}
+
+window.restoreVersion = (versionId) => {
+  const history = loadVersionHistory()
+  const version = history.versions.find(v => v.id === versionId)
+  
+  if (!version) {
+    console.error('❌ 找不到这个版本')
+    return
+  }
+
+  Object.assign(globalState, version.data)
+  history.currentVersionId = versionId
+  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(history))
+  
+  console.log(`⏰ 已恢复到版本：${version.savedAtReadable}`)
+  console.log('👉 页面数据已自动刷新！')
+}
+
+window.showVersions = () => {
+  const history = loadVersionHistory()
+  console.log('\n')
+  console.log('%c⏰ 剧本时光机 - 可用历史版本', 'font-size: 16px; font-weight: bold; color: #409eff;')
+  console.log('='.repeat(60))
+  
+  history.versions.forEach((v, i) => {
+    const isCurrent = v.id === history.currentVersionId ? '  ← 当前版本' : ''
+    const flag = v.id === history.currentVersionId ? '🟢' : '🟡'
+    console.log(`%c${flag} [${i}] ${v.savedAtReadable}${isCurrent}`, 
+      v.id === history.currentVersionId ? 'color: #67c23a; font-weight: bold' : 'color: #e6a23c')
+    console.log(`   恢复命令: restoreVersion(${v.id})`)
+  })
+  
+  console.log('='.repeat(60))
+  console.log('%c💡 提示: 输入 showVersions() 查看所有版本', 'color: #909399')
+  console.log('%c💡 提示: 输入 restoreVersion(版本号) 回到该版本', 'color: #909399')
+  console.log('\n')
+}
+
+window.clearAllVersions = () => {
+  localStorage.removeItem(AUTOSAVE_KEY)
+  console.log('🗑️ 所有版本已清空，刷新页面生效！')
+}
+
+const DEFAULT_STATE = {
   title: '白潮回响',
   track: '主线',
   theme: '悬疑科幻',
@@ -26,5 +162,164 @@ export const globalState = reactive({
   pipelineCharacters: '',
   pipelineOutline: '',
   pipelineActiveStep: 0,
+  pipelineCurrentScene: 1,
+  pipelineIsScriptEnd: false,
+  pipelineCompletionReason: '',
   scriptContent: '',
+}
+
+const history = loadVersionHistory()
+const latestVersionData = sanitizeStateData(history.versions[0]?.data || {})
+
+if (history.versions.length > 0) {
+  console.log(`✅ 时光机已启动，找到 ${history.versions.length} 个历史版本`)
+  console.log('💡 输入 showVersions() 查看所有版本')
+}
+
+function cloneDefaultState() {
+  return JSON.parse(JSON.stringify(DEFAULT_STATE))
+}
+
+const initialState = { ...cloneDefaultState(), ...latestVersionData }
+export const globalState = reactive(initialState)
+
+export function resetProjectWorkspace() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+
+  localStorage.removeItem(AUTOSAVE_KEY)
+  localStorage.removeItem(MANUAL_SAVE_KEY)
+  Object.assign(globalState, cloneDefaultState())
+}
+
+const fieldsToWatch = [
+  () => globalState.scriptContent,
+  () => globalState.pipelineCharacters,
+  () => globalState.pipelineOutline,
+  () => globalState.pipelineThemeInput,
+  () => globalState.pipelineSettingInput,
+  () => globalState.pipelineProtagonistInput,
+  () => globalState.pipelineConflictInput,
+  () => globalState.pipelineStyleInput,
+  () => globalState.pipelineEndingInput,
+  () => globalState.pipelineExtraInput,
+  () => globalState.pipelineActiveStep,
+  () => globalState.pipelineCurrentScene,
+  () => globalState.pipelineIsScriptEnd,
+  () => globalState.pipelineCompletionReason,
+]
+
+let saveTimer = null
+fieldsToWatch.forEach(getter => {
+  watch(getter, () => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(createNewVersion, AUTOSAVE_DEBOUNCE_MS)
+  }, { deep: true })
 })
+
+// 手动保存功能
+function loadManualVersions() {
+  try {
+    const saved = localStorage.getItem(MANUAL_SAVE_KEY)
+    if (saved) {
+      const history = sanitizeHistoryPayload(JSON.parse(saved))
+      return history
+    }
+  } catch (e) {
+    console.warn('⚠️ 手动存档损坏，使用默认值')
+  }
+  return {
+    currentVersionId: null,
+    versions: [],
+  }
+}
+
+function createManualVersion(description = '') {
+  const history = loadManualVersions()
+  const currentData = extractStateData()
+
+  if (history.versions.length > 0) {
+    const lastData = history.versions[0].data
+    if (JSON.stringify(currentData) === JSON.stringify(lastData)) {
+      console.log('⚠️ 内容未变化，无需手动保存')
+      return
+    }
+  }
+
+  const newVersion = {
+    id: Date.now(),
+    savedAt: Date.now(),
+    savedAtReadable: new Date().toLocaleString('zh-CN'),
+    description: description || '手动保存',
+    data: currentData,
+  }
+
+  history.versions.unshift(newVersion)
+  history.currentVersionId = newVersion.id
+
+  if (history.versions.length > MAX_MANUAL_VERSIONS) {
+    history.versions = history.versions.slice(0, MAX_MANUAL_VERSIONS)
+  }
+
+  localStorage.setItem(MANUAL_SAVE_KEY, JSON.stringify(history))
+  console.log(`💾 已手动保存版本 #${history.versions.length}/${MAX_MANUAL_VERSIONS}，${newVersion.savedAtReadable}`)
+  console.log(`📝 描述：${newVersion.description}`)
+  return newVersion
+}
+
+function restoreManualVersion(versionId) {
+  const history = loadManualVersions()
+  const version = history.versions.find(v => v.id === versionId)
+  
+  if (!version) {
+    console.error('❌ 找不到这个手动保存版本')
+    return
+  }
+
+  Object.assign(globalState, version.data)
+  history.currentVersionId = versionId
+  localStorage.setItem(MANUAL_SAVE_KEY, JSON.stringify(history))
+  
+  console.log(`⏰ 已恢复到手动保存版本：${version.savedAtReadable}`)
+  console.log(`📝 描述：${version.description}`)
+  console.log('👉 页面数据已自动刷新！')
+}
+
+function showManualVersions() {
+  const history = loadManualVersions()
+  console.log('\n')
+  console.log('%c⏰ 手动保存版本', 'font-size: 16px; font-weight: bold; color: #67c23a;')
+  console.log('='.repeat(60))
+  
+  if (history.versions.length === 0) {
+    console.log('📭 暂无手动保存版本')
+  } else {
+    history.versions.forEach((v, i) => {
+      const isCurrent = v.id === history.currentVersionId ? '  ← 当前版本' : ''
+      const flag = v.id === history.currentVersionId ? '🟢' : '🟡'
+      console.log(`%c${flag} [${i}] ${v.savedAtReadable}${isCurrent}`, 
+        v.id === history.currentVersionId ? 'color: #67c23a; font-weight: bold' : 'color: #e6a23c')
+      console.log(`   📝 描述: ${v.description}`)
+      console.log(`   恢复命令: restoreManualVersion(${v.id})`)
+    })
+  }
+  
+  console.log('='.repeat(60))
+  console.log('%c💡 提示: 输入 saveManually("描述") 手动保存', 'color: #909399')
+  console.log('%c💡 提示: 输入 showManualVersions() 查看手动版本', 'color: #909399')
+  console.log('%c💡 提示: 输入 restoreManualVersion(版本号) 恢复手动版本', 'color: #909399')
+  console.log('\n')
+}
+
+function clearManualVersions() {
+  localStorage.removeItem(MANUAL_SAVE_KEY)
+  console.log('🗑️ 所有手动保存版本已清空，刷新页面生效！')
+}
+
+// 导出手动保存相关函数
+window.saveManually = createManualVersion
+window.showManualVersions = showManualVersions
+window.restoreManualVersion = restoreManualVersion
+window.clearManualVersions = clearManualVersions

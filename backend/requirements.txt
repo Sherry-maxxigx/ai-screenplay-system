@@ -1,16 +1,8 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-pydantic
 pydantic-settings
-python-multipart
 requests
 openai
 zhipuai
-sqlalchemy
-pymysql
-motor
-pymilvus
 neo4j
-
-

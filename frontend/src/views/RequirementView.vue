@@ -102,7 +102,7 @@
 <script setup>
 import { ref, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElButton, ElProgress, ElAlert, ElTag, ElCard } from 'element-plus'
 import { globalState } from '../stores/project.js'
 import axios from 'axios'
 

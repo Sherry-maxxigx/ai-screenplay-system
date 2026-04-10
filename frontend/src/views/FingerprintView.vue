@@ -42,15 +42,13 @@
                 show-icon
                 style="margin-bottom: 20px"
               />
-              <el-table :data="reportData.similar_fragments" border>
-                <el-table-column prop="source" label="同质化比对来源(版权子库)" width="250" />
-                <el-table-column prop="similarity" label="相似度占比">
-                  <template #default="scope">
-                    <span style="color:red">{{ (scope.row.similarity * 100).toFixed(1) }}%</span>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="fragment" label="同构叙事片段分析(5大特征维度)" />
-              </el-table>
+              <div v-if="reportData.similar_fragments && reportData.similar_fragments.length > 0" style="margin-top: 20px;">
+                <h4>相似片段匹配</h4>
+                <p>发现 {{ reportData.similar_fragments.length }} 个相似片段，最高相似度: {{ (reportData.max_similarity * 100).toFixed(1) }}%</p>
+              </div>
+              <div v-else style="margin-top: 20px; color: #67c23a;">
+                <h4>✅ 未发现相似片段</h4>
+              </div>
             </el-col>
           </el-row>
         </el-card>
@@ -92,7 +90,7 @@
 <script setup>
 import { ref } from 'vue'
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElButton, ElProgress, ElAlert, ElTable, ElTableColumn, ElInput, ElCard } from 'element-plus'
 import { globalState } from '../stores/project.js'
 
 const reportData = ref(null)

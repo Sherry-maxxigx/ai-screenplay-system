@@ -221,7 +221,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElSwitch, ElSlider, ElButton, ElSelect, ElOption, ElCard } from 'element-plus'
 import { getRuntimeAISettings, saveRuntimeAISettings } from '../api/ai'
 
 const loading = ref(false)

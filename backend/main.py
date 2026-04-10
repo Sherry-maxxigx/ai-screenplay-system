@@ -6,6 +6,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import router as api_router
+from app.core.local_runtime import start_monitor
 
 
 app = FastAPI(
@@ -23,6 +24,11 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api")
+
+
+@app.on_event("startup")
+def startup_local_runtime_monitor():
+    start_monitor()
 
 
 @app.get("/", include_in_schema=False)
