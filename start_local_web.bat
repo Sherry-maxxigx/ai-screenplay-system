@@ -26,6 +26,7 @@ set "NODE_HOME="
 set "LOCAL_NODE_DIR=%ROOT_DIR%\.localtools\node-v20.20.2-win-x64"
 set "BROWSER_EXE="
 set "SKIP_FRONTEND_BUILD=1"
+set "LOCAL_APP_SESSION_MODE_VALUE=0"
 
 if exist "%ROOT_DIR%\.venv\Scripts\python.exe" (
   set "PYTHON_EXE=%ROOT_DIR%\.venv\Scripts\python.exe"
@@ -53,7 +54,7 @@ if errorlevel 1 (
 
 call :prepare_log_paths
 
-"%PYTHON_EXE%" -c "import sys; from pathlib import Path; legacy = Path(r'%ROOT_DIR%') / '.venv_broken' / 'Lib' / 'site-packages'; legacy_str = str(legacy); sys.path.append(legacy_str) if legacy.exists() and legacy_str not in sys.path else None; import uvicorn, fastapi" >nul 2>nul
+"%PYTHON_EXE%" -c "import uvicorn, fastapi, requests, openai, neo4j, pydantic_settings, zhipuai" >nul 2>nul
 if errorlevel 1 (
   echo Installing backend dependencies...
   "%PYTHON_EXE%" -m pip install -r "%BACKEND_DIR%\requirements.txt"
@@ -121,8 +122,13 @@ echo Stopping any previous local app instance...
 call :stop_existing_instances
 call :clear_browser_profile
 
+if defined MANAGED_BROWSER (
+  rem Keep the backend alive and let the watcher handle shutdown explicitly.
+  set "LOCAL_APP_SESSION_MODE_VALUE=0"
+)
+
 echo Starting backend service...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:LOCAL_APP_SESSION_MODE = '1'; $env:LOCAL_APP_STARTUP_GRACE_SECONDS = '90'; $env:LOCAL_APP_CLIENT_TIMEOUT_SECONDS = '45'; $env:LOCAL_APP_EMPTY_SHUTDOWN_SECONDS = '8'; $env:LOCAL_APP_BACKEND_PID_FILE = '%BACKEND_PID_FILE%'; $process = Start-Process -PassThru -WindowStyle Hidden -FilePath '%PYTHON_EXE%' -WorkingDirectory '%ROOT_DIR%' -ArgumentList 'backend\launch_local.py' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERR%'; if (-not $process) { exit 1 }; for ($i = 0; $i -lt 3; $i++) { try { if (Test-Path -LiteralPath '%BACKEND_PID_FILE%') { Remove-Item -LiteralPath '%BACKEND_PID_FILE%' -Force -ErrorAction Stop }; [System.IO.File]::WriteAllText('%BACKEND_PID_FILE%', [string]$process.Id, [System.Text.Encoding]::ASCII); exit 0 } catch { Start-Sleep -Milliseconds 300 } }; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:LOCAL_APP_SESSION_MODE = '%LOCAL_APP_SESSION_MODE_VALUE%'; $env:LOCAL_APP_STARTUP_GRACE_SECONDS = '90'; $env:LOCAL_APP_CLIENT_TIMEOUT_SECONDS = '45'; $env:LOCAL_APP_EMPTY_SHUTDOWN_SECONDS = '8'; $env:LOCAL_APP_BACKEND_PID_FILE = '%BACKEND_PID_FILE%'; $process = Start-Process -PassThru -WindowStyle Hidden -FilePath '%PYTHON_EXE%' -WorkingDirectory '%ROOT_DIR%' -ArgumentList 'backend\launch_local.py' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERR%'; if (-not $process) { exit 1 }; for ($i = 0; $i -lt 3; $i++) { try { if (Test-Path -LiteralPath '%BACKEND_PID_FILE%') { Remove-Item -LiteralPath '%BACKEND_PID_FILE%' -Force -ErrorAction Stop }; [System.IO.File]::WriteAllText('%BACKEND_PID_FILE%', [string]$process.Id, [System.Text.Encoding]::ASCII); exit 0 } catch { Start-Sleep -Milliseconds 300 } }; exit 0"
 if errorlevel 1 (
   echo [ERROR] Failed to launch the backend process.
   echo Check these files for details:

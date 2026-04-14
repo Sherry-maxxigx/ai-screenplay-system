@@ -6,7 +6,7 @@
           <p class="eyebrow">Story Automation Workshop</p>
           <h1>自动化工坊</h1>
           <p>
-            把核心故事设定拆成几块来写，系统会自动整理成统一需求，再依次生成人物、大纲和剧本。功能保持不变，但整个流程会更清晰、更好编辑。
+            把核心故事设定拆成几块来写，系统会自动整理成统一需求，再依次生成人物、大纲和剧本第一幕。第一幕后你可以继续在这里生成下一幕，也可以直接进入显性创作轨细化改写。
           </p>
         </div>
         <div class="hero-summary">
@@ -15,12 +15,12 @@
             <strong>{{ stepTitles[activeStep] }}</strong>
           </div>
           <div class="summary-item">
-            <span>必填项</span>
+            <span>填写项</span>
             <strong>4 项</strong>
           </div>
           <div class="summary-item">
             <span>生成状态</span>
-            <strong :style="activeStep > 0 ? 'color: #67c23a' : ''">{{ genStatusText }}</strong>
+            <strong :style="activeStep > 0 ? 'color: #67c23a' : ''">{{ workshopStatusText }}</strong>
           </div>
           <div class="summary-item">
             <span>手动保存</span>
@@ -32,21 +32,9 @@
       </section>
 
       <section class="status-strip">
-        <div class="status-card">
-          <span>故事题材</span>
-          <strong>{{ shorten(themeInput) || '待填写' }}</strong>
-        </div>
-        <div class="status-card">
-          <span>背景设定</span>
-          <strong>{{ shorten(settingInput) || '待填写' }}</strong>
-        </div>
-        <div class="status-card">
-          <span>主角设定</span>
-          <strong>{{ shorten(protagonistInput) || '待填写' }}</strong>
-        </div>
-        <div class="status-card">
-          <span>风格要求</span>
-          <strong>{{ shorten(styleInput) || '待填写' }}</strong>
+        <div v-for="card in summaryCards" :key="card.label" class="status-card">
+          <span>{{ card.label }}</span>
+          <strong>{{ shorten(card.value) || '待填写' }}</strong>
         </div>
       </section>
 
@@ -55,11 +43,22 @@
           <div class="card-head">
             <div>
               <h2>分步生成流程</h2>
-              <p>从核心设定开始，逐步生成角色、剧情和剧本正文。</p>
+              <p>从核心设定开始，逐步生成角色、剧情和当前幕草稿。</p>
             </div>
-            <el-steps :active="activeStep" :key="'steps-' + activeStep" finish-status="success" simple class="steps">
-              <el-step v-for="(title, index) in stepTitles" :key="index" :title="title" />
-            </el-steps>
+            <div class="steps-nav">
+              <button
+                v-for="(title, index) in stepTitles"
+                :key="index"
+                type="button"
+                class="step-tab"
+                :class="{ active: index === activeStep, reached: index <= reachedStep }"
+                :disabled="index > reachedStep"
+                @click="jumpToStep(index)"
+              >
+                <span>0{{ index + 1 }}</span>
+                <strong>{{ title }}</strong>
+              </button>
+            </div>
           </div>
         </template>
 
@@ -67,86 +66,24 @@
           <div class="progress-meta">
             <div>
               <p class="progress-label">正在生成</p>
-              <h3>{{ progressText }}</h3>
+              <h3>{{ progressHeadline }}</h3>
+              <p v-if="progressStageText" class="progress-stage">{{ progressStageText }}</p>
             </div>
-            <div class="progress-number">{{ progressValue }}%</div>
+            <div class="progress-number">{{ progressPercentText }}</div>
           </div>
-          <el-progress
-            :percentage="progressValue"
-            :format="progressFormat"
-            :stroke-width="14"
-            striped
-            striped-flow
-            :duration="10"
-          />
-        </div>
-
-        <div v-if="lastRuleValidation" class="rule-validation-panel">
-          <div class="rule-head">
-            <h4>叙事规则内生引擎校验结果</h4>
-            <el-tag :type="lastRuleValidation.is_valid ? 'success' : 'danger'" effect="dark" round>
-              {{ lastRuleValidation.is_valid ? '基本合规通过' : '基本合规未通过' }}
-            </el-tag>
+          <div class="progress-track" role="progressbar" :aria-valuenow="Math.round(progressValue)" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-fill" :style="{ width: `${progressValue}%` }"></div>
           </div>
-
-          <div class="rule-metrics">
-            <span>基本合规分：{{ lastRuleValidation.metrics?.hard_compliance_score ?? '--' }}</span>
-            <span>创意参考分：{{ lastRuleValidation.metrics?.creative_reference_score ?? '--' }}</span>
-            <span>伏笔回收率：{{ lastRuleValidation.metrics?.foreshadow_recovery_rate ?? '--' }}%</span>
-          </div>
-
-          <div v-if="(lastRuleValidation.hard_errors || []).length" style="margin-bottom: 12px;">
-            <div
-              v-for="(error, idx) in lastRuleValidation.hard_errors"
-              :key="idx"
-              style="margin-bottom: 12px;"
+          <p class="progress-target">{{ progressDisplayText }}</p>
+          <div class="act-progress-strip">
+            <span
+              v-for="label in actStageTitles"
+              :key="label"
+              class="act-progress-chip"
+              :class="{ active: label === progressTargetAct }"
             >
-              <el-alert
-                type="error"
-                :closable="false"
-                :title="`⚠️ 硬性问题：${error.description}`"
-              >
-                <template #default>
-                  <p style="margin: 8px 0; color: #666; font-size: 13px;">
-                    💡 修改建议：{{ error.fix_instruction }}
-                  </p>
-                  <el-button
-                    size="small"
-                    type="danger"
-                    plain
-                    @click="applyOneFix(error, idx)"
-                    :loading="fixingIndex === idx"
-                    style="margin-top: 4px;"
-                  >
-                    🔧 一键应用此修复
-                  </el-button>
-                </template>
-              </el-alert>
-            </div>
-            
-            <el-button 
-              type="danger" 
-              size="small"
-              @click="applyAllFixes"
-              :disabled="!lastRuleValidation.hard_errors.length"
-              style="margin-top: 8px;"
-            >
-              🚀 一键应用全部修复
-            </el-button>
-          </div>
-          
-          <div v-else-if="(lastRuleValidation.soft_warnings || []).length">
-            <div
-              v-for="(warning, idx) in lastRuleValidation.soft_warnings"
-              :key="idx"
-              style="margin-bottom: 12px;"
-            >
-              <el-alert
-                type="warning"
-                :closable="false"
-                :title="`💡 创意优化建议：${warning.description}`"
-              />
-            </div>
+              {{ label }}
+            </span>
           </div>
         </div>
 
@@ -155,91 +92,64 @@
             <div>
               <p class="section-tag">Step 1</p>
               <h3>填写核心设定</h3>
-              <p>下面四项是必须填写的，其他项如果暂时没想好，可以交给系统补全。</p>
+              <p>先选择剧本形式题材，再在对应卡片里完成 4 项核心信息。旧的输入逻辑已经全部移除，后续人物、大纲和剧本都会严格按这里的题材结构走。</p>
             </div>
             <div class="section-note">
-              <el-tag type="danger" effect="dark" round>故事题材 / 背景设定 / 主角设定 / 风格要求 为必填</el-tag>
+              <el-tag type="danger" effect="dark" round>先选题材，再填写所选题材下的 4 项信息</el-tag>
             </div>
           </div>
 
-          <div class="field-grid">
-            <div class="field-card required">
-              <label>故事题材 <em>必填</em></label>
-              <p>告诉系统这是什么类型的故事，比如悬疑、科幻、爱情、古装、犯罪等。</p>
-              <el-input
-                v-model="themeInput"
-                type="textarea"
-                :rows="3"
-                placeholder="例如：悬疑科幻电影，带封闭空间和灾难元素。"
-              />
-            </div>
-
-            <div class="field-card required">
-              <label>背景设定 <em>必填</em></label>
-              <p>描述故事发生的世界、地点、时代和关键背景事件。</p>
-              <el-input
-                v-model="settingInput"
-                type="textarea"
-                :rows="5"
-                placeholder="例如：近未来，一座废弃多年的海上研究站在台风夜重新启动，并向外界发出神秘求救信号。"
-              />
-            </div>
-
-            <div class="field-card required">
-              <label>主角设定 <em>必填</em></label>
-              <p>写清主角是谁、有什么能力、被什么问题困住。</p>
-              <el-input
-                v-model="protagonistInput"
-                type="textarea"
-                :rows="5"
-                placeholder="例如：女主角林澈，32 岁，曾是研究站工程师，也是事故唯一幸存者，长期被愧疚和创伤困住。"
-              />
-            </div>
-
-            <div class="field-card optional">
-              <label>核心冲突 <span>可选</span></label>
-              <p>如果你已经清楚主角要对抗什么，可以写在这里；留空系统会自动补全。</p>
-              <el-input
-                v-model="conflictInput"
-                type="textarea"
-                :rows="5"
-                placeholder="例如：主角必须在揭露真相和保护仍然活着的人之间做选择。"
-              />
-            </div>
-
-            <div class="field-card required">
-              <label>风格要求 <em>必填</em></label>
-              <p>告诉系统你想要的气质、节奏、情绪和表达方式。</p>
-              <el-input
-                v-model="styleInput"
-                type="textarea"
-                :rows="4"
-                placeholder="例如：压迫感强、悬念推进快、对白克制、视觉感冷冽，整体偏电影化中文表达。"
-              />
-            </div>
-
-            <div class="field-card optional">
-              <label>结局方向 <span>可选</span></label>
-              <p>你可以提前指定结尾情绪，比如开放式、悲壮、反转、温暖等。</p>
-              <el-input
-                v-model="endingInput"
-                type="textarea"
-                :rows="4"
-                placeholder="例如：结尾带悲壮感，但留下开放式余韵。"
-              />
-            </div>
-
+          <div class="format-tabs" role="tablist" aria-label="剧本形式题材">
+            <button
+              v-for="format in scriptFormatOptions"
+              :key="format.value"
+              type="button"
+              class="format-tab"
+              :class="{ active: scriptFormat === format.value }"
+              @click="scriptFormat = format.value"
+            >
+              {{ format.label }}
+            </button>
           </div>
 
-          <div class="wide-card">
-            <label>补充说明 <span>可选</span></label>
-            <p>这里适合写你突然想到的镜头感、人物关系、禁区设定或其他特殊要求。</p>
-            <el-input
-              v-model="extraInput"
-              type="textarea"
-              :rows="4"
-              placeholder="例如：尽量避免网络流行语，人物对白要偏现实主义；希望第一场就出现强钩子。"
-            />
+          <div class="format-grid">
+            <section
+              v-for="format in scriptFormatOptions"
+              :key="format.value"
+              class="format-panel"
+              :class="{ active: scriptFormat === format.value }"
+            >
+              <div class="format-panel-head">
+                <div>
+                  <p class="section-tag">Form {{ format.shortLabel }}</p>
+                  <h4>{{ format.label }}</h4>
+                </div>
+                <el-tag :type="scriptFormat === format.value ? 'primary' : 'info'" effect="plain" round>
+                  {{ scriptFormat === format.value ? '当前填写区' : '未选中' }}
+                </el-tag>
+              </div>
+              <p class="format-panel-copy">{{ format.panelHint }}</p>
+
+              <div class="format-field-list">
+                <div
+                  v-for="field in format.fields"
+                  :key="`${format.value}-${field.key}`"
+                  class="field-card"
+                  :class="{ inactive: scriptFormat !== format.value }"
+                >
+                  <label>{{ field.label }}</label>
+                  <p>{{ field.description }}</p>
+                  <el-input
+                    :model-value="getFormatFieldValue(format.value, field.key)"
+                    type="textarea"
+                    :rows="4"
+                    :disabled="scriptFormat !== format.value"
+                    :placeholder="field.placeholder"
+                    @update:model-value="updateFormatField(format.value, field.key, $event)"
+                  />
+                </div>
+              </div>
+            </section>
           </div>
 
           <div class="preview-card">
@@ -248,7 +158,7 @@
                 <p class="section-tag">Auto Compiled Brief</p>
                 <h4>系统整理后的需求预览</h4>
               </div>
-              <span>你填写的内容会被自动整理成统一指令，再送去后端生成。</span>
+              <span>当前已按“{{ selectedFormatConfig.label }}”结构整理，后端人物、大纲和分幕生成都会读取这套新逻辑。</span>
             </div>
             <el-input :model-value="compiledRequirements" type="textarea" :rows="12" readonly />
           </div>
@@ -282,8 +192,7 @@
             placeholder="这里会出现系统生成的人物设定。"
           />
           <div class="action-bar">
-            <el-button @click="goBackStep(0)" size="large">返回上一步</el-button>
-            <el-button type="primary" size="large" @click="generateOutline" :loading="loadingData">
+            <el-button type="primary" size="large" @click="generateOutline" :loading="loadingData" :disabled="generationBusy && !loadingData">
               生成剧情大纲
             </el-button>
           </div>
@@ -294,7 +203,7 @@
             <div>
               <p class="section-tag">Step 3</p>
               <h3>剧情大纲</h3>
-              <p>你可以在这里调整幕结构、冲突节奏和高潮设计，再继续生成剧本正文。</p>
+              <p>你可以在这里调整所选题材对应的分幕结构、冲突节奏和每一幕的推进重点，再继续生成当前幕草稿。</p>
             </div>
             <el-tag type="warning" effect="dark" round>建议检查冲突升级</el-tag>
           </div>
@@ -310,74 +219,12 @@
             :closable="false"
             show-icon
             style="margin-top: 16px;"
-            :title="completionReason || '剧本已经完整收束，可以进入高级编辑器导出 PDF。'"
+            :title="lockedCompletionNoticeText"
           />
 
-          <div class="advisor-panel">
-            <div class="advisor-head">
-              <h4>📐 大纲 AI 修改建议助手</h4>
-              <el-button size="small" @click="generateOutlineAdvice" :loading="outlineAdviceLoading">
-                一键生成修改建议
-              </el-button>
-            </div>
-            
-            <div v-if="outlineSuggestions.length" style="margin-top: 15px;">
-              <div
-                v-for="(item, idx) in outlineSuggestions"
-                :key="item.id || idx"
-                style="margin-bottom: 15px;"
-              >
-                <el-alert
-                  :type="item.type === '冲突升级' ? 'error' :
-                         item.type === '人物弧光' ? 'warning' :
-                         item.type === '伏笔设计' ? 'success' :
-                         item.type === '结构节奏' ? 'info' : ''"
-                  :closable="false"
-                  :title="`${item.type}：${item.description}`"
-                >
-                  <template #default>
-                    <div style="margin-top: 10px;">
-                      <div v-if="item.applied" class="suggestion-applied-row">
-                        <span class="applied-flag">已应用</span>
-                      </div>
-                      <div style="display: flex; gap: 20px; margin-bottom: 10px;">
-                        <div>
-                          <span style="color: #999; font-size: 13px;">修改前：</span>
-                          <p style="background: #f5f7fa; padding: 8px 12px; border-radius: 6px; margin: 5px 0; font-size: 13px;">{{ item.before }}</p>
-                        </div>
-                        <div style="text-align: center; line-height: 60px; color: #67c23a; font-weight: bold;">
-                          →
-                        </div>
-                        <div>
-                          <span style="color: #999; font-size: 13px;">修改后：</span>
-                          <p style="background: #f0f9eb; padding: 8px 12px; border-radius: 6px; margin: 5px 0; font-size: 13px; color: #67c23a;">{{ item.after }}</p>
-                        </div>
-                      </div>
-                      <el-button
-                        size="small"
-                        type="success"
-                        plain
-                        @click="applyOutlineSuggestion(idx)"
-                        :loading="applyingOutlineSuggestionIdx === idx"
-                        :disabled="item.applied"
-                      >
-                        ✨ 一键应用此修改
-                      </el-button>
-                    </div>
-                  </template>
-                </el-alert>
-              </div>
-            </div>
-            
-            <p v-else-if="!outlineAdviceLoading" style="color: #999; text-align: center; margin: 20px 0; font-size: 13px;">
-              点击"一键生成修改建议"按钮，AI 将分析大纲结构问题并给出具体修改方案
-            </p>
-          </div>
-
           <div class="action-bar">
-            <el-button @click="goBackStep(1)" size="large">返回上一步</el-button>
-            <el-button type="primary" size="large" @click="generateScript" :loading="loadingData">
-              生成剧本正文
+            <el-button type="primary" size="large" @click="runScriptGeneration({ forceFirstAct: true })" :loading="loadingData" :disabled="generationBusy && !loadingData">
+              {{ firstActButtonText }}
             </el-button>
           </div>
         </div>
@@ -386,111 +233,131 @@
           <div class="section-head">
             <div>
               <p class="section-tag">Step 4</p>
-              <h3>剧本正文</h3>
-              <p>生成完成后可以直接进入高级编辑器，继续做细化改写和状态网络联动。</p>
+              <h3>当前幕草稿</h3>
+              <p>自动化工坊会按当前题材进度一次产出一整幕草稿。接下来你可以继续生成下一幕，或直接进入显性创作轨细化改写。</p>
             </div>
-            <el-tag type="info" effect="dark" round>可直接进入编辑器</el-tag>
+            <el-tag type="info" effect="dark" round>可进入显性创作轨</el-tag>
           </div>
           <el-input
             v-model="script"
             type="textarea"
             :rows="22"
-            placeholder="这里会出现系统生成的剧本正文。"
+            placeholder="这里会出现系统生成的幕次正文。"
+          />
+
+          <el-alert
+            v-if="scriptStatusAlertText"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-top: 16px;"
+            :title="scriptStatusAlertText"
           />
 
           <div class="advisor-panel">
             <div class="advisor-head">
-              <h4>AI 修改建议助手（给不懂剧本结构的用户）</h4>
-              <el-button size="small" @click="generateScriptAdvice" :loading="adviceLoading">
-                一键生成修改建议
-              </el-button>
-            </div>
-            
-            <div v-if="structuredSuggestions.length" style="margin-top: 15px;">
-              <div
-                v-for="(item, idx) in structuredSuggestions"
-                :key="item.id || idx"
-                style="margin-bottom: 15px;"
-              >
-                <el-alert
-                  :type="item.type === '冲突优化' ? 'error' :
-                         item.type === '人物动机' ? 'warning' :
-                         item.type === '伏笔埋设' ? 'success' :
-                         item.type === '结构调整' ? 'info' : ''"
-                  :closable="false"
-                  :title="`${item.type}：${item.description}`"
-                >
-                  <template #default>
-                    <div style="margin-top: 10px;">
-                      <div v-if="item.applied" class="suggestion-applied-row">
-                        <span class="applied-flag">已应用</span>
-                      </div>
-                      <div style="display: flex; gap: 20px; margin-bottom: 10px;">
-                        <div style="flex: 1;">
-                          <div style="color: #f56c6c; font-size: 12px; margin-bottom: 5px;">
-                            📝 修改前：
-                          </div>
-                          <pre style="background: #f5f5f5; padding: 8px; border-radius: 4px; 
-                                      font-size: 12px; white-space: pre-wrap; margin: 0;
-                                      max-height: 80px; overflow: auto;">{{ item.before }}</pre>
-                        </div>
-                        <div style="flex: 1;">
-                          <div style="color: #67c23a; font-size: 12px; margin-bottom: 5px;">
-                            ✨ 修改后：
-                          </div>
-                          <pre style="background: #f0f9eb; padding: 8px; border-radius: 4px;
-                                      font-size: 12px; white-space: pre-wrap; margin: 0;
-                                      max-height: 80px; overflow: auto;">{{ item.after }}</pre>
-                        </div>
-                      </div>
-                      <el-button
-                        size="small"
-                        type="primary"
-                        plain
-                        @click="applyAISuggestion(item, idx)"
-                        :loading="applyingSuggestionIdx === idx"
-                        :disabled="item.applied"
-                      >
-                        🔧 一键应用此修改
-                      </el-button>
-                    </div>
-                  </template>
-                </el-alert>
+              <div>
+                <h4>当前幕 AI 修改意见</h4>
               </div>
-              
-              <el-button 
-                type="primary" 
-                size="small"
-                @click="applyAllAISuggestions"
-                :disabled="!structuredSuggestions.length"
-                style="margin-top: 5px;"
-              >
-                🚀 一键应用全部AI建议
-              </el-button>
+              <div class="advisor-actions">
+                <el-button size="small" @click="generateCurrentActReview" :loading="adviceLoading">
+                  一键生成AI修改意见
+                </el-button>
+                <el-button
+                  v-if="currentActAnalysis?.has_issues && !currentActRevision"
+                  size="small"
+                  type="warning"
+                  @click="generateCurrentActRevision"
+                  :loading="revisionLoading"
+                >
+                  一键生成修改版本
+                </el-button>
+                <el-button
+                  v-if="currentActRevision"
+                  size="small"
+                  type="success"
+                  @click="applyCurrentActRevision"
+                  :loading="applyingRevision"
+                >
+                  一键应用修改
+                </el-button>
+              </div>
             </div>
-            
+
+            <div v-if="currentActAnalysis" class="act-review-grid">
+              <div class="review-block">
+                <div class="review-block-head">
+                  <span>问题 1</span>
+                  <strong>当前幕是否完整覆盖本幕大纲</strong>
+                </div>
+                <p class="review-block-summary">{{ currentActAnalysis.missing_outline?.summary }}</p>
+                <div
+                  v-for="(item, idx) in currentActAnalysis.missing_outline?.items || []"
+                  :key="`missing-${idx}`"
+                  class="review-item"
+                >
+                  <strong>缺失节点 {{ idx + 1 }}</strong>
+                  <p>{{ item.text }}</p>
+                </div>
+                <p v-if="!(currentActAnalysis.missing_outline?.items || []).length" class="review-ok-text">
+                  这一方面没有明显问题。
+                </p>
+              </div>
+
+              <div class="review-block">
+                <div class="review-block-head">
+                  <span>问题 2</span>
+                  <strong>当前幕是否有脱离大纲的内容</strong>
+                </div>
+                <p class="review-block-summary">{{ currentActAnalysis.off_outline?.summary }}</p>
+                <div
+                  v-for="(item, idx) in currentActAnalysis.off_outline?.items || []"
+                  :key="`off-outline-${idx}`"
+                  class="review-item"
+                >
+                  <strong>{{ item.problem }}</strong>
+                  <p>{{ item.reason }}</p>
+                  <pre v-if="item.snippet">{{ item.snippet }}</pre>
+                </div>
+                <p v-if="!(currentActAnalysis.off_outline?.items || []).length" class="review-ok-text">
+                  这一方面没有明显问题。
+                </p>
+              </div>
+            </div>
+
+            <div v-if="currentActRevision" class="revision-preview">
+              <div class="revision-head">
+                <div>
+                  <p class="section-tag">AI Revision</p>
+                  <h4>当前幕修改版本</h4>
+                </div>
+              <el-tag type="success" effect="dark" round>
+                可直接应用
+              </el-tag>
+            </div>
             <el-input
-              v-model="scriptAdvice"
+              :model-value="currentActRevision.revisedAct"
               type="textarea"
-              :rows="4"
+              :rows="14"
               readonly
-              placeholder="点击“一键生成修改建议”，AI 会告诉你哪里有问题、怎么改、改完会有什么效果。"
-              style="margin-top: 15px;"
+              placeholder="这里会显示 AI 生成的当前幕修改版本。"
             />
+            </div>
+
+            <div v-else-if="!currentActAnalysis && !adviceLoading && !revisionLoading" />
           </div>
 
           <div class="action-bar">
-            <el-button @click="goBackStep(2)" size="large">返回上一步</el-button>
             <el-button 
               type="primary" 
               size="large" 
-              @click="generateScript"
+              @click="runScriptGeneration"
               :loading="loadingData"
-              :disabled="isScriptEnd"
+              :disabled="generationLocked || (generationBusy && !loadingData)"
             >
               {{ nextScriptButtonText }}
             </el-button>
-            <el-button type="success" size="large" @click="finishPipeline">进入高级编辑器</el-button>
+            <el-button type="success" size="large" @click="finishPipeline">进入显性创作轨</el-button>
           </div>
         </div>
       </el-card>
@@ -501,16 +368,29 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, toRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElAlert } from 'element-plus'
+import { ElMessage } from 'element-plus'
 
 import {
   generateCharacters as apiGenerateCharacters,
   generateOutline as apiGenerateOutline,
   generatePipelineScript,
-  analyzePlotWithAdvice,
 } from '../api/ai'
-import { checkScriptCompletion, generateNextBeat as generateNextBeatAPI } from '../api/narrative'
+import {
+  generateNextAct as generateNextActAPI,
+  reviewCurrentAct,
+  reviseCurrentAct,
+} from '../api/narrative'
 import { globalState } from '../stores/project'
+import { getRequestErrorMessage } from '../utils/apiError'
+import { getLockedCompletionNotice } from '../utils/completionText'
+import { formatActProgress, getNextActLabel } from '../utils/actProgress'
+import {
+  getScriptFormatActSequence,
+  getScriptFormatConfig,
+  getScriptFormatOptions,
+  resolveScriptFormat,
+} from '../utils/scriptFormat'
+import { normalizeScriptText } from '../utils/scriptText'
 
 const router = useRouter()
 const activeStep = toRef(globalState, 'pipelineActiveStep')
@@ -518,37 +398,41 @@ const loadingData = ref(false)
 
 const progressValue = ref(0)
 const progressText = ref('')
+const progressPhase = ref('idle')
+const progressElapsedSeconds = ref(0)
+const progressCap = ref(0)
+const progressTargetAct = ref('')
 const lastRuleValidation = ref(null)
-const scriptAdvice = ref('')
-const structuredSuggestions = ref([])
 const adviceLoading = ref(false)
-const fixingIndex = ref(-1)
-const applyingSuggestionIdx = ref(-1)
-
-const outlineSuggestions = ref([])
-const outlineAdviceLoading = ref(false)
-const applyingOutlineSuggestionIdx = ref(-1)
+const revisionLoading = ref(false)
+const applyingRevision = ref(false)
+const scriptCompletion = ref(null)
+const currentActAnalysis = ref(null)
+const currentActRevision = ref(null)
 let progressTimer = null
+let progressRampTimer = null
 
-const stepTitles = ['核心设定', '人物设定', '剧情大纲', '剧本正文']
+const stepTitles = ['核心设定', '人物设定', '剧情大纲', '当前幕草稿']
+const scriptFormatOptions = getScriptFormatOptions()
+const scriptFormat = toRef(globalState, 'pipelineScriptFormat')
+const latestActReviewed = toRef(globalState, 'pipelineLatestActReviewed')
+const actStageTitles = computed(() => getScriptFormatActSequence(scriptFormat.value))
+const sharedGenerationBusy = computed(() => Boolean(globalState.pipelineGenerationInFlight))
+const generationBusy = computed(() => loadingData.value || sharedGenerationBusy.value)
+const generationInOtherView = computed(() => sharedGenerationBusy.value && !loadingData.value)
 
-const genStatusText = computed(() => {
-  if (loadingData.value) return '⏳ 处理中...'
-  if (activeStep.value === 0) return '准备就绪'
-  if (activeStep.value === 1) return '✅ 人物设定已完成'
-  if (activeStep.value === 2) return '✅ 剧情大纲已完成'
-  if (activeStep.value === 3) return '✅ 全部生成完成'
-  return '待开始'
-})
-
-const themeInput = toRef(globalState, 'pipelineThemeInput')
-const settingInput = toRef(globalState, 'pipelineSettingInput')
-const protagonistInput = toRef(globalState, 'pipelineProtagonistInput')
-const conflictInput = toRef(globalState, 'pipelineConflictInput')
-const styleInput = toRef(globalState, 'pipelineStyleInput')
-const endingInput = toRef(globalState, 'pipelineEndingInput')
-const extraInput = toRef(globalState, 'pipelineExtraInput')
-const currentScene = ref(1) // 当前场次
+const movieCoreIdea = toRef(globalState, 'pipelineMovieCoreIdea')
+const movieProtagonist = toRef(globalState, 'pipelineMovieProtagonist')
+const movieConflict = toRef(globalState, 'pipelineMovieConflict')
+const movieTone = toRef(globalState, 'pipelineMovieTone')
+const seriesPreviousEnding = toRef(globalState, 'pipelineSeriesPreviousEnding')
+const seriesCharacterFocus = toRef(globalState, 'pipelineSeriesCharacterFocus')
+const seriesToneDirection = toRef(globalState, 'pipelineSeriesToneDirection')
+const seriesCliffhanger = toRef(globalState, 'pipelineSeriesCliffhanger')
+const microHook = toRef(globalState, 'pipelineMicroHook')
+const microProtagonist = toRef(globalState, 'pipelineMicroProtagonist')
+const microConflict = toRef(globalState, 'pipelineMicroConflict')
+const microTone = toRef(globalState, 'pipelineMicroTone')
 const isScriptEnd = ref(false) // 是否剧本结束
 
 const requirements = toRef(globalState, 'pipelineRequirements')
@@ -557,36 +441,83 @@ const outline = toRef(globalState, 'pipelineOutline')
 const script = toRef(globalState, 'scriptContent')
 const completionReason = toRef(globalState, 'pipelineCompletionReason')
 
-const cleanGeneratedText = (text) => {
-  if (!text) return ''
-  return text
-    .replace(/\r\n/g, '\n')
-    .replace(/[#*_`]/g, '')
-    .replace(/EXT\./g, '外景')
-    .replace(/INT\./g, '内景')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+const formatFieldRefs = {
+  movie: {
+    coreIdea: movieCoreIdea,
+    protagonist: movieProtagonist,
+    conflict: movieConflict,
+    tone: movieTone,
+  },
+  series: {
+    previousEnding: seriesPreviousEnding,
+    characterFocus: seriesCharacterFocus,
+    toneDirection: seriesToneDirection,
+    cliffhanger: seriesCliffhanger,
+  },
+  micro: {
+    hook: microHook,
+    protagonist: microProtagonist,
+    conflict: microConflict,
+    tone: microTone,
+  },
 }
 
-const decorateSuggestions = (items = []) =>
-  items.map((item, idx) => ({
-    ...item,
-    id: item.id || idx + 1,
-    applied: Boolean(item.applied),
+const selectedFormatConfig = computed(() => getScriptFormatConfig(scriptFormat.value))
+const selectedFormatFields = computed(() => selectedFormatConfig.value.fields || [])
+const summaryCards = computed(() =>
+  selectedFormatFields.value.map((field) => ({
+    label: field.summaryLabel || field.label,
+    value: getFormatFieldValue(scriptFormat.value, field.key),
   }))
+)
+const reachedStep = computed(() => {
+  let step = 0
+  if (characters.value.trim()) step = 1
+  if (outline.value.trim()) step = 2
+  if (script.value.trim()) step = 3
+  return Math.max(step, activeStep.value || 0)
+})
 
-const inferSceneCount = (text) => {
-  const normalized = cleanGeneratedText(text)
-  if (!normalized) return 0
-  const numbered = normalized.match(/^第\s*[一二三四五六七八九十百零\d]+\s*场/gm)
-  if (numbered?.length) return numbered.length
-  return normalized.match(/^(内景|外景)/gm)?.length || 0
+const workshopStatusText = computed(() => {
+  if (loadingData.value) return '正在处理...'
+  if (generationInOtherView.value) {
+    return `正在生成${globalState.pipelineGenerationTargetAct || '下一幕'}`
+  }
+  if (activeStep.value === 0) return '准备就绪'
+  if (activeStep.value === 1) return '人物设定已完成'
+  if (activeStep.value === 2) return '剧情大纲已完成'
+  if (script.value.trim()) {
+    return formatActProgress(scriptCompletion.value, script.value, {
+      scriptFormat: scriptFormat.value,
+      latestActReviewed: latestActReviewed.value,
+    })
+  }
+  return '待开始'
+})
+
+const firstActButtonText = computed(() => (script.value.trim() ? '重新生成第一幕' : '生成第一幕'))
+
+const cleanGeneratedText = (text) => {
+  return normalizeScriptText(text)
+}
+
+const resetCurrentActAssistant = () => {
+  currentActAnalysis.value = null
+  currentActRevision.value = null
+}
+
+const markLatestActNeedsReview = () => {
+  latestActReviewed.value = false
+}
+
+const markLatestActReviewed = () => {
+  latestActReviewed.value = true
 }
 
 const resetScriptProgress = (clearScript = false) => {
-  currentScene.value = 1
-  isScriptEnd.value = false
-  completionReason.value = ''
+  syncScriptCompletion(null)
+  markLatestActNeedsReview()
+  resetCurrentActAssistant()
   if (clearScript) {
     script.value = ''
   }
@@ -598,59 +529,168 @@ const shorten = (text) => {
   return value.length > 16 ? `${value.slice(0, 16)}...` : value
 }
 
+const getFormatFieldRef = (formatKey, fieldKey) => formatFieldRefs[resolveScriptFormat(formatKey)]?.[fieldKey] || null
+
+const getFormatFieldValue = (formatKey, fieldKey) => getFormatFieldRef(formatKey, fieldKey)?.value || ''
+
+const updateFormatField = (formatKey, fieldKey, value) => {
+  const fieldRef = getFormatFieldRef(formatKey, fieldKey)
+  if (fieldRef) fieldRef.value = value
+}
+
 const hasRequiredFields = computed(() =>
-  [themeInput.value, settingInput.value, protagonistInput.value, styleInput.value].every(
-    (value) => value && value.trim()
-  )
+  selectedFormatFields.value.every((field) => getFormatFieldValue(scriptFormat.value, field.key).trim())
 )
 
 const buildRequirementsText = () => {
-  const requiredSections = [
-    ['故事题材', themeInput.value],
-    ['背景设定', settingInput.value],
-    ['主角设定', protagonistInput.value],
-    ['风格要求', styleInput.value],
+  const config = selectedFormatConfig.value
+  const sections = [
+    ['剧本形式题材', config.label],
+    ['结构要求', config.outlineSections.map((item) => `${item.label}：${item.description}`).join('\n')],
+    ...config.fields.map((field) => [field.label, getFormatFieldValue(scriptFormat.value, field.key)]),
   ]
 
-  const optionalSections = [
-    ['核心冲突', conflictInput.value || '如果用户没有明确填写，请根据题材、背景与主角状态自动补全最能推动剧情的核心冲突。'],
-    ['结局方向', endingInput.value || '如果用户没有明确填写，请自行设计一个与整体风格一致、带余味的结局方向。'],
-    ['补充说明', extraInput.value || '如果用户没有填写补充说明，请在不偏离核心设定的前提下，自主补足适合故事成立的细节。'],
-  ]
-
-  return [...requiredSections, ...optionalSections]
-    .filter(([, value]) => value && value.trim())
+  return sections
+    .filter(([, value]) => value && String(value).trim())
     .map(([title, value]) => `${title}\n${value.trim()}`)
     .join('\n\n')
 }
 
 const compiledRequirements = computed(() => buildRequirementsText())
+const generationLocked = computed(() => {
+  if (!script.value.trim()) return false
+  if (isScriptEnd.value) return true
+  if (scriptCompletion.value?.generation_locked) return true
+  if (scriptCompletion.value?.can_continue === false) return true
+  return false
+})
+const lockedCompletionNoticeText = computed(() => getLockedCompletionNotice(
+  scriptCompletion.value || globalState.pipelineCompletionSnapshot || null,
+  latestActReviewed.value,
+))
+const scriptCompletionStatusText = computed(() => {
+  if (!script.value.trim()) return ''
+  if (loadingData.value && progressPhase.value === 'finishing') return '正在核对当前已写到哪一幕...'
+  return formatActProgress(scriptCompletion.value, script.value, {
+    scriptFormat: scriptFormat.value,
+    latestActReviewed: latestActReviewed.value,
+  })
+})
+const scriptStatusAlertText = computed(() => {
+  if (generationLocked.value) return lockedCompletionNoticeText.value
+  return scriptCompletionStatusText.value
+})
 const nextScriptButtonText = computed(() => {
-  if (isScriptEnd.value) return '剧终'
-  if (!script.value.trim()) return '生成剧本正文'
-  return '生成下一节拍'
+  if (generationLocked.value) return latestActReviewed.value ? '已完结' : '已完结（未修改）'
+  if (!script.value.trim()) return '生成第一幕'
+  return '生成下一幕'
 })
 
-const progressFormat = (percentage) => (percentage === 100 ? '完成' : `${percentage}%`)
+const progressHeadline = computed(() => progressText.value)
 
-const startProgress = (text) => {
-  progressValue.value = 0
-  progressText.value = text
-  if (progressTimer) clearInterval(progressTimer)
+const progressStageText = computed(() => {
+  if (!loadingData.value) return ''
 
-  progressTimer = setInterval(() => {
-    if (progressValue.value >= 96) {
-      clearInterval(progressTimer)
-    } else {
-      progressValue.value += Math.floor(Math.random() * 5) + 1
-      if (progressValue.value > 96) progressValue.value = 96
-    }
-  }, 800)
+  const phaseTextMap = {
+    queued: '请求已提交',
+    waiting: '大模型生成中',
+    validating: '结果整理与规则检查中',
+    finishing: '当前幕次核对中',
+    complete: '生成完成',
+  }
+
+  const phaseText = phaseTextMap[progressPhase.value] || '处理中'
+  return `${phaseText} · 已用时 ${progressElapsedSeconds.value}s`
+})
+
+const progressPercentText = computed(() => `${Math.round(progressValue.value)}%`)
+const progressDisplayText = computed(() => (progressTargetAct.value ? `当前目标：${progressTargetAct.value}` : '当前目标：处理中'))
+
+const clearProgressTimer = () => {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+  if (progressRampTimer) {
+    clearInterval(progressRampTimer)
+    progressRampTimer = null
+  }
 }
 
-const stopProgress = () => {
-  if (progressTimer) clearInterval(progressTimer)
+const startProgress = (text, targetAct = '') => {
+  clearProgressTimer()
+  progressValue.value = 6
+  progressCap.value = 18
+  progressText.value = text
+  progressTargetAct.value = targetAct
+  progressPhase.value = 'queued'
+  progressElapsedSeconds.value = 0
+  progressTimer = setInterval(() => {
+    progressElapsedSeconds.value += 1
+  }, 1000)
+  progressRampTimer = setInterval(() => {
+    if (progressValue.value >= progressCap.value) return
+    const remaining = progressCap.value - progressValue.value
+    const step = remaining > 16 ? 2 : remaining > 7 ? 1 : 0.4
+    progressValue.value = Math.min(progressCap.value, Math.round((progressValue.value + step) * 10) / 10)
+  }, 240)
+}
+
+const setProgressCheckpoint = (phase, text, percentage, cap = null) => {
+  if (text) progressText.value = text
+  if (phase) progressPhase.value = phase
+  if (typeof percentage === 'number') {
+    progressValue.value = Math.max(progressValue.value, Math.min(percentage, 99))
+  }
+  const fallbackCapMap = {
+    queued: 18,
+    waiting: 72,
+    validating: 94,
+    finishing: 97,
+    complete: 100,
+  }
+  const resolvedCap =
+    typeof cap === 'number'
+      ? cap
+      : Math.max(percentage ?? progressValue.value, fallbackCapMap[phase] ?? progressValue.value)
+  progressCap.value = Math.max(progressValue.value, Math.min(resolvedCap, 99))
+}
+
+const completeProgress = async (text = '生成完成') => {
+  if (text) progressText.value = text
+  progressPhase.value = 'complete'
+  progressCap.value = 100
+  if (progressRampTimer) {
+    clearInterval(progressRampTimer)
+    progressRampTimer = null
+  }
+  await new Promise((resolve) => {
+    const finalRamp = setInterval(() => {
+      const remaining = 100 - progressValue.value
+      if (remaining <= 0.4) {
+        progressValue.value = 100
+        clearInterval(finalRamp)
+        resolve()
+        return
+      }
+      const step = remaining > 18 ? 4.8 : remaining > 9 ? 2.4 : remaining > 4 ? 1.2 : 0.5
+      progressValue.value = Math.min(100, Math.round((progressValue.value + step) * 10) / 10)
+    }, 45)
+  })
+  await new Promise((resolve) => setTimeout(resolve, 180))
+  clearProgressTimer()
+  progressPhase.value = 'complete'
   progressValue.value = 100
+}
+
+const resetProgress = () => {
+  clearProgressTimer()
+  progressPhase.value = 'idle'
+  progressElapsedSeconds.value = 0
+  progressCap.value = 0
+  progressValue.value = 0
+  progressText.value = ''
+  progressTargetAct.value = ''
 }
 
 const ensureRequirements = () => {
@@ -659,145 +699,61 @@ const ensureRequirements = () => {
   return text
 }
 
+const resolveRequestError = (error, fallbackText) => getRequestErrorMessage(error, fallbackText)
+
 const syncRuleValidation = (result) => {
-  lastRuleValidation.value = result?.data?.meta?.rule_validation || null
+  lastRuleValidation.value = result?.data?.meta?.rule_validation || result?.data?.validation || null
 }
 
-const syncScriptCompletion = (completion = null, sourceText = script.value) => {
-  const countedScenes = Math.max(0, Number(completion?.scene_count ?? inferSceneCount(sourceText)))
-  isScriptEnd.value = Boolean(completion?.is_complete)
-  currentScene.value = isScriptEnd.value ? Math.max(1, countedScenes) : Math.max(1, countedScenes + 1)
-  completionReason.value = String(completion?.reason || '')
+const syncScriptCompletion = (completion = null) => {
+  const snapshot = completion ? { ...completion } : null
+  scriptCompletion.value = snapshot
+  globalState.pipelineCompletionSnapshot = snapshot
+  const generationStopped = Boolean(
+    snapshot?.is_complete ||
+    snapshot?.generation_locked ||
+    snapshot?.can_continue === false
+  )
+  isScriptEnd.value = generationStopped
+  completionReason.value = String(snapshot?.reason || '')
 }
 
-const refreshScriptCompletion = async (sourceText = script.value, silent = false) => {
+const ensureScriptCompletion = async (completion = null, sourceText = script.value) => {
   const normalized = cleanGeneratedText(sourceText)
   if (!normalized) {
     syncScriptCompletion(null, '')
     return null
   }
 
-  try {
-    const response = await checkScriptCompletion(normalized, outline.value || '')
-    const completion = response.data?.completion || null
-    syncScriptCompletion(completion, normalized)
-    return completion
-  } catch (error) {
-    if (!silent) console.error(error)
-    syncScriptCompletion(null, normalized)
-    return null
-  }
-}
-
-const applyOneFix = async (error, idx) => {
-  fixingIndex.value = idx
-  
-  await new Promise(r => setTimeout(r, 500))
-  
-  const errorHandlers = {
-    'OUTLINE_3ACT_MISSING': () => {
-      outline.value += `
-
-==== 系统自动补全 三幕结构 ====
-
-【第一幕 · 建置】
-铺垫核心世界观，主角登场并接触核心悬念
-
-【第二幕 · 对抗】
-冲突全面升级，反派力量逐渐显现
-
-【第三幕 · 解决】
-伏笔集中回收，真相揭晓
-`
-    },
-    
-    'SCENE_HEADER_MISSING': () => {
-      script.value = `==== 系统自动补全标准化场景头 ====
-
-第一幕·第01场
-内景 公寓书房 夜
-
-` + script.value
-    },
-    
-    'ACT_SECTION_MISSING': () => {
-      script.value = `第一幕·第01场
-` + script.value
-    },
-    
-    'DIALOGUE_MISSING': () => {
-      script.value += `
-
-==== 系统自动补全对白示例 ====
-
-主角：（沉吟）"有些事情，不是我们想逃就能逃掉的。"
-`
-    },
-    
-    'FORESHADOW_NOT_RECOVERED': () => {
-      script.value += `
-
-==== 伏笔回收节点 · 系统建议 ====
-开场出现的【关键信物】，在终场揭示为当年事件的核心证物
-`
-    },
-    
-    'CHARACTER_INCONSISTENT': () => {
-      script.value = `==== 系统自动植入核心角色 ====
-
-林澈看着眼前的一切，指尖因为用力而泛白。
-
-` + script.value
-    },
-
-    'EMPTY_OUTPUT': () => {
-      script.value = `第一幕·第01场
-内景 研究站控制室 凌晨
-
-红色警报灯在黑暗中循环闪烁，控制台屏幕上只有一行字："实验体已苏醒"
-`
-    },
-  }
-
-  if (errorHandlers[error.code]) {
-    errorHandlers[error.code]()
-  } else {
-    ElMessage.info(`该错误类型暂不支持自动修复，请手动调整`)
-  }
-
-  fixingIndex.value = -1
-  ElMessage.success(`已应用修复建议，请人工审阅调整`)
-}
-
-const applyAllFixes = async () => {
-  const errors = [...(lastRuleValidation.hard_errors || [])]
-  for (let i = 0; i < errors.length; i++) {
-    await applyOneFix(errors[i], i)
-  }
-  ElMessage.success(`已自动应用 ${errors.length} 项修复建议`)
+  const resolvedCompletion = completion || globalState.pipelineCompletionSnapshot || scriptCompletion.value || null
+  syncScriptCompletion(resolvedCompletion)
+  return resolvedCompletion
 }
 
 const generateCharacters = async () => {
   const compiled = ensureRequirements()
   if (!hasRequiredFields.value) {
-    ElMessage.warning('请先填写故事题材、背景设定、主角设定和风格要求。')
+    ElMessage.warning(`请先完成“${selectedFormatConfig.value.label}”下的 4 项必填信息。`)
     return
   }
 
   loadingData.value = true
   startProgress('正在根据核心设定生成人物设定...')
   try {
-    const result = await apiGenerateCharacters(compiled)
+    setProgressCheckpoint('waiting', '已提交请求，正在等待模型生成人物设定...', 20)
+    const result = await apiGenerateCharacters(compiled, scriptFormat.value)
+    setProgressCheckpoint('validating', '模型已返回，正在整理人物设定...', 78)
     syncRuleValidation(result)
     characters.value = cleanGeneratedText(result.data.characters)
-    stopProgress()
+    await completeProgress('人物设定生成完成，正在写入结果...')
     activeStep.value = 1
     await forceSyncSteps()
   } catch (error) {
     console.error(error)
-    ElMessage.warning('人物设定生成失败，请稍后重试。')
+    ElMessage.warning(resolveRequestError(error, '人物设定生成失败，请稍后重试。'))
   } finally {
     loadingData.value = false
+    if (progressPhase.value !== 'complete') resetProgress()
   }
 }
 
@@ -806,305 +762,262 @@ const generateOutline = async () => {
   loadingData.value = true
   startProgress('正在根据人物设定生成剧情大纲...')
   try {
-    const result = await apiGenerateOutline(compiled, characters.value)
+    setProgressCheckpoint('waiting', '已提交请求，正在等待模型生成剧情大纲...', 20)
+    const result = await apiGenerateOutline(compiled, characters.value, scriptFormat.value)
+    setProgressCheckpoint('validating', '模型已返回，正在整理剧情大纲...', 78)
     syncRuleValidation(result)
     outline.value = cleanGeneratedText(result.data.outline)
     resetScriptProgress(true)
-    structuredSuggestions.value = []
-    scriptAdvice.value = ''
-    stopProgress()
+    await completeProgress('剧情大纲生成完成，正在写入结果...')
     activeStep.value = 2
     await forceSyncSteps()
   } catch (error) {
     console.error(error)
-    ElMessage.warning('剧情大纲生成失败，请稍后重试。')
+    ElMessage.warning(resolveRequestError(error, '剧情大纲生成失败，请稍后重试。'))
   } finally {
     loadingData.value = false
+    if (progressPhase.value !== 'complete') resetProgress()
   }
 }
 
-const generateScript = async () => {
-  if (activeStep.value !== 3 || !script.value.trim()) {
-    resetScriptProgress(true)
-  }
-  if (isScriptEnd.value) {
-    ElMessage.info('剧本已结束，无法继续生成。')
+const runScriptGeneration = async (options = {}) => {
+  const forceFirstAct = typeof options === 'boolean' ? options : Boolean(options?.forceFirstAct)
+  const currentScript = cleanGeneratedText(script.value)
+  const generatingFirstAct = forceFirstAct || !currentScript
+
+  if (!generatingFirstAct && generationLocked.value) {
+    ElMessage.info(lockedCompletionNoticeText.value)
     return
   }
-  
+  if (generationBusy.value && !loadingData.value) {
+    ElMessage.info(`当前正在生成${globalState.pipelineGenerationTargetAct || '下一幕'}，请稍等。`)
+    return
+  }
+
   const compiled = ensureRequirements()
+  resetCurrentActAssistant()
+  markLatestActNeedsReview()
+  lastRuleValidation.value = null
+
+  const progressAct = generatingFirstAct
+    ? '第一幕'
+    : (getNextActLabel(scriptCompletion.value, scriptFormat.value, currentScript) || '下一幕')
+
   loadingData.value = true
-  startProgress(script.value.trim() ? '正在根据剩余大纲续写下一节拍...' : '正在根据剧情大纲生成剧本开篇...')
+  globalState.pipelineGenerationInFlight = true
+  globalState.pipelineGenerationTargetAct = progressAct
+  startProgress(
+    generatingFirstAct
+      ? '正在根据剧情大纲生成第一幕...'
+      : `正在根据剧情大纲生成${progressAct}...`,
+    progressAct
+  )
+
   try {
-    if (!script.value.trim()) {
+    if (generatingFirstAct) {
+      setProgressCheckpoint('waiting', '请求已提交，正在等待模型生成第一幕...', 20)
       const result = await generatePipelineScript(
         compiled,
         characters.value,
         outline.value,
-        currentScene.value
+        scriptFormat.value,
+      )
+      setProgressCheckpoint('validating', '模型已返回，正在整理第一幕正文...', 72)
+      syncRuleValidation(result)
+      script.value = cleanGeneratedText(result.data?.script || '')
+      globalState.scriptContent = script.value
+      setProgressCheckpoint('finishing', '正在同步当前幕状态...', 88)
+      await ensureScriptCompletion(result.data?.completion || null, script.value)
+    } else {
+      setProgressCheckpoint('waiting', `请求已提交，正在等待模型生成${progressAct}...`, 20)
+      const result = await generateNextActAPI(
+        currentScript,
+        outline.value,
+        characters.value,
+        compiled,
+        scriptFormat.value,
       )
       syncRuleValidation(result)
-      script.value = cleanGeneratedText(result.data.script)
-    } else {
-      const completionBefore = await refreshScriptCompletion(script.value, true)
-      if (completionBefore?.is_complete || isScriptEnd.value) {
-        stopProgress()
-        ElMessage.info(completionReason.value || '当前剧本已经完成收束。')
+      setProgressCheckpoint('validating', '模型已返回，正在整理新一幕正文...', 72)
+      const nextText = cleanGeneratedText(result.data?.text || '')
+      if (!nextText) {
+        await ensureScriptCompletion(result.data?.completion || scriptCompletion.value || null, currentScript)
+        await completeProgress('当前题材已经写到可结束的位置')
+        ElMessage.info(lockedCompletionNoticeText.value)
         return
       }
-
-      lastRuleValidation.value = null
-      const result = await generateNextBeatAPI(script.value, outline.value, characters.value)
-      const nextText = cleanGeneratedText(result.data?.text || '')
-      if (nextText) {
-        script.value = cleanGeneratedText(`${script.value}\n\n${nextText}`)
-      }
-      syncScriptCompletion(result.data?.completion || null, script.value)
+      script.value = cleanGeneratedText(`${currentScript}\n\n${nextText}`)
+      globalState.scriptContent = script.value
+      setProgressCheckpoint('finishing', '正在同步当前幕状态...', 88)
+      await ensureScriptCompletion(result.data?.completion || null, script.value)
     }
 
-    await refreshScriptCompletion(script.value, true)
-    stopProgress()
+    await completeProgress('本轮生成完成，正在整理幕次结果...')
     activeStep.value = 3
     await forceSyncSteps()
+    const acceptedWithIssues = Boolean(lastRuleValidation.value && !lastRuleValidation.value.is_valid)
+    const progressText = formatActProgress(scriptCompletion.value, script.value, {
+      scriptFormat: scriptFormat.value,
+      latestActReviewed: latestActReviewed.value,
+    })
 
-    if (isScriptEnd.value) {
-      ElMessage.success(completionReason.value || '剧本已完整收束，可以进入高级编辑器导出 PDF。')
+    if (acceptedWithIssues) {
+      ElMessage.warning(
+        isScriptEnd.value
+          ? '本轮剧本已生成并到达结尾，但当前幕还有待调整的问题，建议先看下方提示，再决定是否生成 AI 修改意见。'
+          : `${progressText}，但当前幕还有待调整的问题，建议先看下方提示，再决定是否生成 AI 修改意见。`
+      )
+    } else if (isScriptEnd.value) {
+      ElMessage.success(lockedCompletionNoticeText.value)
     } else {
-      ElMessage.success(`✅ 当前已写到第 ${Math.max(1, currentScene.value - 1)} 场，下一次将继续按大纲往后推进。`)
+      ElMessage.success(progressText)
     }
   } catch (error) {
     console.error(error)
-    ElMessage.warning('剧本正文生成失败，请稍后重试。')
+    ElMessage.warning(resolveRequestError(error, '剧本幕次生成失败，请稍后重试。'))
   } finally {
     loadingData.value = false
+    globalState.pipelineGenerationInFlight = false
+    globalState.pipelineGenerationTargetAct = ''
+    if (progressPhase.value !== 'complete') resetProgress()
   }
 }
 
-const smartReplace = (originalText, searchText, replaceText) => {
-  if (!searchText || !replaceText) return originalText
-  
-  // 1. 直接精确替换
-  if (originalText.includes(searchText)) {
-    return originalText.replace(searchText, replaceText)
-  }
-  
-  // 2. 忽略多余空格和大小写的模糊匹配
-  const normalize = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase()
-  const normalizedOriginal = normalize(originalText)
-  const normalizedSearch = normalize(searchText)
-  
-  if (normalizedOriginal.includes(normalizedSearch)) {
-    const lines = originalText.split('\n')
-    for (let i = 0; i < lines.length; i++) {
-      if (normalize(lines[i]).includes(normalizedSearch)) {
-        lines[i] = replaceText
-        return lines.join('\n')
-      }
-    }
-  }
-  
-  // 3. 关键词匹配（至少60%关键词命中）
-  const searchWords = normalizedSearch.split(' ').filter(w => w.length > 2)
-  if (searchWords.length > 0) {
-    const lines = originalText.split('\n')
-    for (let i = 0; i < lines.length; i++) {
-      const lineWords = normalize(lines[i]).split(' ')
-      const matchCount = searchWords.filter(w => lineWords.some(lw => lw.includes(w))).length
-      if (matchCount >= Math.max(1, searchWords.length * 0.5)) {
-        lines[i] = replaceText
-        return lines.join('\n')
-      }
-    }
-  }
-  
-  // 4. 找不到则返回原文（不再追加）
-  return originalText
-}
-
-const applyAISuggestion = async (item, idx) => {
-  if (!item || item.applied) return
-
-  applyingSuggestionIdx.value = idx
-  
-  await new Promise(r => setTimeout(r, 500))
-  
-  script.value = smartReplace(
-    script.value,
-    item.before,
-    item.after
-  )
-  structuredSuggestions.value[idx].applied = true
-  
-  applyingSuggestionIdx.value = -1
-  ElMessage.success(`✅ 已应用第 ${idx + 1} 条AI建议`)
-}
-
-const applyAllAISuggestions = async () => {
-  for (let i = 0; i < structuredSuggestions.value.length; i++) {
-    if (!structuredSuggestions.value[i]?.applied) {
-      await applyAISuggestion(structuredSuggestions.value[i], i)
-    }
-  }
-  ElMessage.success(`🚀 已全部应用 ${structuredSuggestions.value.length} 条AI建议`)
-}
-
-const generateFallbackSuggestions = () => {
-  const lines = script.value.split('\n').filter(l => l.trim())
-  if (lines.length < 3) return []
-  
-  return [
-    {
-      id: 1,
-      type: '冲突优化',
-      description: '加强戏剧冲突，让人物行动更有张力',
-      before: lines[Math.min(2, lines.length - 1)] || '',
-      after: `【冲突升级】${lines[Math.min(2, lines.length - 1)] || ''}，空气仿佛凝固了`,
-      confidence: 0.9
-    },
-    {
-      id: 2,
-      type: '人物动机',
-      description: '丰富人物动作细节，强化内心动机',
-      before: lines[Math.min(5, lines.length - 1)] || '',
-      after: `【细节刻画】${lines[Math.min(5, lines.length - 1)] || ''}，眼中闪过一丝复杂`,
-      confidence: 0.85
-    },
-    {
-      id: 3,
-      type: '对白优化',
-      description: '让对话更有潜台词和言外之意',
-      before: lines[Math.min(8, lines.length - 1)] || '',
-      after: `【对白优化】${lines[Math.min(8, lines.length - 1)] || ''}，话里有话`,
-      confidence: 0.8
-    }
-  ]
-}
-
-const generateScriptAdvice = async () => {
+const generateCurrentActReview = async () => {
   const sourceText = cleanGeneratedText(script.value)
   if (!sourceText) {
-    ElMessage.warning('请先生成剧本正文，再获取修改建议。')
+    ElMessage.warning('请先生成当前幕正文，再生成 AI 修改意见。')
     return
   }
 
   adviceLoading.value = true
-  structuredSuggestions.value = []
+  currentActAnalysis.value = null
+  currentActRevision.value = null
   try {
-    const response = await analyzePlotWithAdvice(sourceText)
-    scriptAdvice.value = cleanGeneratedText(response?.data?.analysis || '')
-    
-    const suggestions = response?.data?.suggestions || []
-    
-    if (suggestions.length) {
-      structuredSuggestions.value = decorateSuggestions(suggestions)
-      ElMessage.success(`✅ AI 已生成 ${suggestions.length} 条结构化修改建议`)
+    const compiled = ensureRequirements()
+    const response = await reviewCurrentAct(
+      sourceText,
+      outline.value || '',
+      characters.value || '',
+      compiled,
+      scriptFormat.value,
+    )
+    currentActAnalysis.value = response?.data?.analysis || null
+    if (!currentActAnalysis.value) {
+      throw new Error('当前幕问题分析结果为空')
+    }
+    if (currentActAnalysis.value.has_issues) {
+      markLatestActNeedsReview()
+      ElMessage.warning('已生成当前幕问题分析，可以继续一键生成修改版本。')
     } else {
-      structuredSuggestions.value = decorateSuggestions(generateFallbackSuggestions())
-      ElMessage.success('✅ 已生成系统优化建议')
+      markLatestActReviewed()
+      ElMessage.success(generationLocked.value ? lockedCompletionNoticeText.value : '当前幕两方面暂未发现明显问题。')
     }
   } catch (error) {
     console.error(error)
-    structuredSuggestions.value = decorateSuggestions(generateFallbackSuggestions())
-    ElMessage.success('✅ 已生成系统优化建议')
+    ElMessage.warning(resolveRequestError(error, '当前幕问题分析失败，请稍后重试。'))
   } finally {
     adviceLoading.value = false
   }
 }
 
-const generateOutlineFallbackSuggestions = () => {
-  const lines = outline.value.split('\n').filter(l => l.trim())
-  if (lines.length < 2) return []
-  
-  return [
-    {
-      id: 1,
-      type: '冲突升级',
-      description: '在第一幕结尾加入转折点，让主角被迫做出选择',
-      before: lines[Math.min(1, lines.length - 1)] || '',
-      after: `【第一幕转折点】${lines[Math.min(1, lines.length - 1)] || ''} —— 一件意外发生，彻底打破了平静`,
-      confidence: 0.92
-    },
-    {
-      id: 2,
-      type: '人物弧光',
-      description: '明确主角的成长路线，从逃避到面对',
-      before: lines[Math.min(3, lines.length - 1)] || '',
-      after: `【人物弧光】${lines[Math.min(3, lines.length - 1)] || ''}，主角内心从动摇走向坚定`,
-      confidence: 0.88
-    },
-    {
-      id: 3,
-      type: '伏笔设计',
-      description: '在前期埋设关键线索，后期呼应回收',
-      before: lines[Math.min(5, lines.length - 1)] || '',
-      after: `【伏笔埋设】${lines[Math.min(5, lines.length - 1)] || ''} —— 此时无人察觉的细节，将在最后成为关键`,
-      confidence: 0.85
-    },
-    {
-      id: 4,
-      type: '结构节奏',
-      description: '调整幕间节奏，确保每30分钟有一个大事件',
-      before: lines[Math.min(7, lines.length - 1)] || '',
-      after: `【节奏把控】${lines[Math.min(7, lines.length - 1)] || ''}，冲突达到小高潮，观众情绪被调动`,
-      confidence: 0.8
-    }
-  ]
-}
-
-const generateOutlineAdvice = async () => {
-  const sourceText = cleanGeneratedText(outline.value)
+const generateCurrentActRevision = async () => {
+  const sourceText = cleanGeneratedText(script.value)
   if (!sourceText) {
-    ElMessage.warning('请先生成剧情大纲，再获取修改建议。')
+    ElMessage.warning('请先生成当前幕正文，再生成修改版本。')
     return
   }
 
-  outlineAdviceLoading.value = true
-  outlineSuggestions.value = []
+  if (!currentActAnalysis.value) {
+    ElMessage.warning('请先点击“一键生成AI修改意见”，确认当前幕问题后再生成修改版本。')
+    return
+  }
+
+  revisionLoading.value = true
+  currentActRevision.value = null
   try {
-    const response = await analyzePlotWithAdvice(sourceText + '\n\n【这是剧情大纲，请从整体结构层面分析】')
-    
-    const suggestions = response?.data?.suggestions || []
-    
-    if (suggestions.length) {
-      outlineSuggestions.value = decorateSuggestions(suggestions.map(s => ({
-        ...s,
-        type: s.type === '冲突优化' ? '冲突升级' :
-              s.type === '人物动机' ? '人物弧光' :
-              s.type === '对白优化' ? '结构节奏' : s.type
-      })))
-      ElMessage.success(`✅ AI 已生成 ${suggestions.length} 条大纲优化建议`)
-    } else {
-      outlineSuggestions.value = decorateSuggestions(generateOutlineFallbackSuggestions())
-      ElMessage.success('✅ 已生成大纲系统优化建议')
+    const compiled = ensureRequirements()
+    const analysis = currentActAnalysis.value
+    if (!analysis) {
+      throw new Error('当前幕问题分析结果为空')
     }
+
+    const response = await reviseCurrentAct(
+      sourceText,
+      outline.value || '',
+      characters.value || '',
+      compiled,
+      analysis,
+      scriptFormat.value,
+    )
+    currentActAnalysis.value = response?.data?.analysis || analysis
+    if (response?.data?.generated === false) {
+      currentActRevision.value = null
+      markLatestActReviewed()
+      ElMessage.success('当前幕暂时不需要生成修改版本。')
+      return
+    }
+    const revisedAct = cleanGeneratedText(response?.data?.revised_act || '')
+    const revisedContent = cleanGeneratedText(response?.data?.revised_content || '')
+    if (!revisedAct || !revisedContent) {
+      throw new Error('AI 没有返回可应用的修改版本')
+    }
+
+    currentActRevision.value = {
+      revisedAct,
+      revisedContent,
+      sourceText,
+      completion: response?.data?.completion || null,
+      warning: response?.data?.warning || '',
+      acceptedWithIssues: Boolean(response?.data?.accepted_with_issues),
+      generated: Boolean(response?.data?.generated),
+    }
+
+    ElMessage.success(
+      currentActRevision.value.acceptedWithIssues
+        ? 'AI 修改版本已生成，你可以先查看下面的版本，再决定是否替换当前正文。'
+        : 'AI 修改版本已生成，确认后可直接应用。'
+    )
   } catch (error) {
     console.error(error)
-    outlineSuggestions.value = decorateSuggestions(generateOutlineFallbackSuggestions())
-    ElMessage.success('✅ 已生成大纲系统优化建议')
+    ElMessage.warning(resolveRequestError(error, '当前幕修改版本生成失败，请稍后重试。'))
   } finally {
-    outlineAdviceLoading.value = false
+    revisionLoading.value = false
   }
 }
 
-const applyOutlineSuggestion = async (idx) => {
-  applyingOutlineSuggestionIdx.value = idx
-  
-  await new Promise(r => setTimeout(r, 500))
-  
-  const item = outlineSuggestions.value[idx]
-  if (!item || item.applied) {
-    applyingOutlineSuggestionIdx.value = -1
+const applyCurrentActRevision = async () => {
+  if (!currentActRevision.value?.revisedContent) return
+  if (cleanGeneratedText(script.value) !== currentActRevision.value.sourceText) {
+    ElMessage.warning('当前幕正文已经变化，请重新生成修改版本，避免覆盖你刚刚的新改动。')
     return
   }
-  outline.value = smartReplace(
-    outline.value,
-    item.before,
-    item.after
-  )
-  outlineSuggestions.value[idx].applied = true
-  
-  applyingOutlineSuggestionIdx.value = -1
-  ElMessage.success(`✅ 已应用第 ${idx + 1} 条大纲优化建议`)
+
+  applyingRevision.value = true
+  try {
+    const revision = currentActRevision.value
+    if (!revision) return
+    script.value = cleanGeneratedText(revision.revisedContent)
+    lastRuleValidation.value = null
+    await ensureScriptCompletion(revision.completion || null, script.value)
+    currentActAnalysis.value = null
+    currentActRevision.value = null
+    if (revision.acceptedWithIssues) {
+      markLatestActNeedsReview()
+    } else {
+      markLatestActReviewed()
+    }
+    ElMessage.success(
+      latestActReviewed.value && generationLocked.value
+        ? lockedCompletionNoticeText.value
+        : 'AI 修改版本已应用到当前幕。'
+    )
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('应用 AI 修改版本失败，请稍后重试。')
+  } finally {
+    applyingRevision.value = false
+  }
 }
 
 const handleManualSave = async () => {
@@ -1123,7 +1036,7 @@ const handleManualSave = async () => {
 
 const finishPipeline = async () => {
   globalState.scriptContent = cleanGeneratedText(script.value)
-  ElMessage.success('剧本已整理完成，正在进入高级编辑器。')
+  ElMessage.success('剧本草稿已整理完成，正在进入显性创作轨。')
 
   try {
     await router.push({ name: 'Editor' })
@@ -1139,18 +1052,11 @@ const forceSyncSteps = async () => {
   await nextTick()
 }
 
-const goBackStep = async (target) => {
+const jumpToStep = async (target) => {
+  if (target < 0 || target > reachedStep.value) return
   activeStep.value = target
   await forceSyncSteps()
 }
-
-watch(
-  currentScene,
-  (value) => {
-    globalState.pipelineCurrentScene = Math.max(1, Number(value || 1))
-  },
-  { immediate: true }
-)
 
 watch(
   isScriptEnd,
@@ -1161,18 +1067,31 @@ watch(
 )
 
 onMounted(async () => {
-  currentScene.value = Math.max(1, Number(globalState.pipelineCurrentScene || currentScene.value || 1))
+  scriptFormat.value = resolveScriptFormat(scriptFormat.value)
   isScriptEnd.value = Boolean(globalState.pipelineIsScriptEnd)
 
   const expectedStep = Math.max(0, Math.min(3, activeStep.value || 0))
   if (globalState.pipelineActiveStep !== expectedStep) {
     globalState.pipelineActiveStep = expectedStep
   }
-  if (script.value.trim()) {
-    await refreshScriptCompletion(script.value, true)
-  }
+  syncScriptCompletion(globalState.pipelineCompletionSnapshot || null)
   await forceSyncSteps()
 })
+
+watch(
+  () => globalState.pipelineCompletionSnapshot,
+  (value) => {
+    scriptCompletion.value = value ? { ...value } : null
+    isScriptEnd.value = Boolean(
+      value?.is_complete ||
+      value?.generation_locked ||
+      value?.can_continue === false ||
+      globalState.pipelineIsScriptEnd
+    )
+    completionReason.value = String(value?.reason || globalState.pipelineCompletionReason || '')
+  },
+  { immediate: true, deep: true }
+)
 
 // 实时监控 activeStep 变化，确保步骤条100%同步
 watch(activeStep, async (newVal, oldVal) => {
@@ -1313,8 +1232,55 @@ watch(activeStep, async (newVal, oldVal) => {
   font-size: 13px;
 }
 
-.steps {
+.steps-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
   min-width: 420px;
+}
+
+.step-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid rgba(16, 51, 92, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #6f7f95;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.step-tab span {
+  font-size: 12px;
+  color: #7a879b;
+}
+
+.step-tab strong {
+  font-size: 13px;
+  color: inherit;
+}
+
+.step-tab.reached {
+  color: #113661;
+}
+
+.step-tab.active {
+  border-color: transparent;
+  background: linear-gradient(135deg, #0f67d8, #1f8f72);
+  color: #f8fbff;
+  box-shadow: 0 12px 24px rgba(15, 103, 216, 0.18);
+}
+
+.step-tab.active span {
+  color: rgba(248, 251, 255, 0.78);
+}
+
+.step-tab:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
 }
 
 .progress-panel {
@@ -1325,38 +1291,48 @@ watch(activeStep, async (newVal, oldVal) => {
   border: 1px solid rgba(59, 93, 159, 0.12);
 }
 
-.rule-validation-panel {
-  margin-bottom: 20px;
-  padding: 16px 18px;
-  border-radius: 14px;
-  background: #f9fbff;
-  border: 1px solid rgba(59, 93, 159, 0.18);
+.progress-track {
+  position: relative;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(17, 54, 97, 0.1);
+  box-shadow: inset 0 1px 2px rgba(17, 54, 97, 0.08);
 }
 
-.rule-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0f67d8 0%, #1d86d7 48%, #1f8f72 100%);
+  box-shadow: 0 10px 20px rgba(15, 103, 216, 0.2);
+  transition: width 0.18s ease-out;
 }
 
-.rule-head h4 {
-  margin: 0;
-  font-size: 16px;
-  color: #113661;
-}
-
-.rule-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 10px;
-  color: #4f6582;
+.progress-target {
+  margin: 12px 0 0;
   font-size: 13px;
+  color: #4f6582;
 }
 
-.rule-alert {
-  margin-top: 6px;
+.act-progress-strip {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.act-progress-chip {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(16, 51, 92, 0.06);
+  color: #6f7f95;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.act-progress-chip.active {
+  background: linear-gradient(135deg, #0f67d8, #1f8f72);
+  color: #f6fbff;
 }
 
 .progress-meta {
@@ -1378,6 +1354,12 @@ watch(activeStep, async (newVal, oldVal) => {
   margin: 8px 0 0;
   font-size: 22px;
   color: #12305c;
+}
+
+.progress-stage {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #5f7291;
 }
 
 .progress-number {
@@ -1416,6 +1398,39 @@ watch(activeStep, async (newVal, oldVal) => {
   gap: 18px;
 }
 
+.format-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.format-tab {
+  padding: 12px 20px;
+  border: 1px solid rgba(16, 51, 92, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #23456d;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.format-tab.active {
+  color: #f6fbff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #0f67d8, #1f8f72);
+  box-shadow: 0 14px 26px rgba(15, 103, 216, 0.18);
+}
+
+.format-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.format-panel,
 .field-card,
 .wide-card,
 .preview-card {
@@ -1425,11 +1440,47 @@ watch(activeStep, async (newVal, oldVal) => {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(247, 250, 255, 0.9) 100%);
 }
 
-.field-card.required {
-  box-shadow: inset 0 0 0 1px rgba(210, 77, 87, 0.08);
+.format-panel {
+  position: relative;
+  border-color: rgba(16, 51, 92, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(16, 51, 92, 0.04);
 }
 
-.field-card.optional,
+.format-panel.active {
+  border-color: rgba(15, 103, 216, 0.28);
+  box-shadow: 0 18px 38px rgba(15, 103, 216, 0.08), inset 0 0 0 1px rgba(15, 103, 216, 0.12);
+}
+
+.format-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.format-panel-head h4 {
+  margin: 0;
+  font-size: 22px;
+  color: #10233e;
+}
+
+.format-panel-copy {
+  margin: 0 0 16px;
+  color: #6f8199;
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+.format-field-list {
+  display: grid;
+  gap: 14px;
+}
+
+.field-card.inactive {
+  opacity: 0.64;
+}
+
 .wide-card {
   box-shadow: inset 0 0 0 1px rgba(26, 100, 155, 0.06);
 }
@@ -1441,13 +1492,6 @@ watch(activeStep, async (newVal, oldVal) => {
   font-size: 16px;
   font-weight: 700;
   color: #12263f;
-}
-
-.field-card label em {
-  margin-left: 8px;
-  font-style: normal;
-  color: #d54c4c;
-  font-size: 12px;
 }
 
 .field-card label span,
@@ -1486,7 +1530,8 @@ watch(activeStep, async (newVal, oldVal) => {
 .advisor-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 16px;
   margin-bottom: 10px;
 }
 
@@ -1494,6 +1539,109 @@ watch(activeStep, async (newVal, oldVal) => {
   margin: 0;
   font-size: 15px;
   color: #12406c;
+}
+
+.advisor-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.advisor-placeholder {
+  margin: 16px 0 0;
+  color: #6c809d;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.act-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.review-block,
+.revision-preview {
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(18, 64, 108, 0.1);
+}
+
+.review-block-head,
+.revision-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.review-block-head span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 60px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(18, 64, 108, 0.08);
+  color: #12406c;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.review-block-head strong {
+  color: #10305b;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.review-block-summary {
+  margin: 0 0 12px;
+  color: #566b87;
+  line-height: 1.7;
+  font-size: 13px;
+}
+
+.review-item {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f5f9ff;
+}
+
+.review-item strong {
+  display: block;
+  color: #10305b;
+  font-size: 13px;
+}
+
+.review-item p {
+  margin: 8px 0 0;
+  color: #52677f;
+  line-height: 1.7;
+  font-size: 13px;
+}
+
+.review-item pre {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #eef4fb;
+  color: #3d5570;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.review-ok-text,
+.revision-warning {
+  margin: 8px 0 0;
+  color: #6c809d;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .suggestion-applied-row {
@@ -1553,9 +1701,10 @@ watch(activeStep, async (newVal, oldVal) => {
     align-items: flex-start;
   }
 
-  .steps {
+  .steps-nav {
     min-width: 0;
     width: 100%;
+    justify-content: flex-start;
   }
 }
 
@@ -1568,9 +1717,22 @@ watch(activeStep, async (newVal, oldVal) => {
     grid-template-columns: 1fr;
   }
 
+  .format-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .act-review-grid {
+    grid-template-columns: 1fr;
+  }
+
   .preview-head,
-  .section-head {
+  .section-head,
+  .advisor-head {
     flex-direction: column;
+  }
+
+  .advisor-actions {
+    justify-content: flex-start;
   }
 
   .action-bar {

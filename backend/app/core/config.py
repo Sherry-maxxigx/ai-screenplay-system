@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: Optional[str] = None
     ZHIPUAI_API_KEY: Optional[str] = "29a636d5b47c4ba78cbe1612e60d33cd.7DCz91mVvjYCCCYI"
-    DEEPSEEK_API_KEY: Optional[str] = "sk-90c0a9261628428d993d14ab5c0ae4c5"
+    DEEPSEEK_API_KEY: Optional[str] = "sk-e6b306eac3f64011b7c59e09e5373f5c"
 
     class Config:
         env_file = ".env"

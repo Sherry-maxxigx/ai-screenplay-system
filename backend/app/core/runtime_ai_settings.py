@@ -41,7 +41,7 @@ def _clamp_float(value, default, minimum=0.0, maximum=1.0):
 
 def _default_settings():
     return {
-        "model_base": "zhipu",
+        "model_base": "deepseek",
         "zhipu_model": PROVIDER_OPTIONS["zhipu"]["default_model"],
         "openai_model": PROVIDER_OPTIONS["openai"]["default_model"],
         "deepseek_model": PROVIDER_OPTIONS["deepseek"]["default_model"],

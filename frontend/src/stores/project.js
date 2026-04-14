@@ -10,6 +10,16 @@ function sanitizeStateData(data = {}) {
   if (!data || typeof data !== 'object') return {}
   const next = { ...data }
   delete next.pipelineTotalScenes
+  delete next.pipelineCurrentScene
+  delete next.pipelineThemeInput
+  delete next.pipelineSettingInput
+  delete next.pipelineProtagonistInput
+  delete next.pipelineConflictInput
+  delete next.pipelineStyleInput
+  delete next.pipelineEndingInput
+  delete next.pipelineExtraInput
+  delete next.pipelineGenerationInFlight
+  delete next.pipelineGenerationTargetAct
   return next
 }
 
@@ -50,17 +60,25 @@ function extractStateData() {
     scriptContent: globalState.scriptContent,
     pipelineCharacters: globalState.pipelineCharacters,
     pipelineOutline: globalState.pipelineOutline,
-    pipelineThemeInput: globalState.pipelineThemeInput,
-    pipelineSettingInput: globalState.pipelineSettingInput,
-    pipelineProtagonistInput: globalState.pipelineProtagonistInput,
-    pipelineConflictInput: globalState.pipelineConflictInput,
-    pipelineStyleInput: globalState.pipelineStyleInput,
-    pipelineEndingInput: globalState.pipelineEndingInput,
-    pipelineExtraInput: globalState.pipelineExtraInput,
+    pipelineRequirements: globalState.pipelineRequirements,
+    pipelineScriptFormat: globalState.pipelineScriptFormat,
+    pipelineMovieCoreIdea: globalState.pipelineMovieCoreIdea,
+    pipelineMovieProtagonist: globalState.pipelineMovieProtagonist,
+    pipelineMovieConflict: globalState.pipelineMovieConflict,
+    pipelineMovieTone: globalState.pipelineMovieTone,
+    pipelineSeriesPreviousEnding: globalState.pipelineSeriesPreviousEnding,
+    pipelineSeriesCharacterFocus: globalState.pipelineSeriesCharacterFocus,
+    pipelineSeriesToneDirection: globalState.pipelineSeriesToneDirection,
+    pipelineSeriesCliffhanger: globalState.pipelineSeriesCliffhanger,
+    pipelineMicroHook: globalState.pipelineMicroHook,
+    pipelineMicroProtagonist: globalState.pipelineMicroProtagonist,
+    pipelineMicroConflict: globalState.pipelineMicroConflict,
+    pipelineMicroTone: globalState.pipelineMicroTone,
     pipelineActiveStep: globalState.pipelineActiveStep,
-    pipelineCurrentScene: globalState.pipelineCurrentScene,
+    pipelineLatestActReviewed: globalState.pipelineLatestActReviewed,
     pipelineIsScriptEnd: globalState.pipelineIsScriptEnd,
     pipelineCompletionReason: globalState.pipelineCompletionReason,
+    pipelineCompletionSnapshot: globalState.pipelineCompletionSnapshot,
   }
 }
 
@@ -152,19 +170,28 @@ const DEFAULT_STATE = {
     { name: '顾南舟', role: '关键线索人物', arc: '从失踪者变成推动真相的核心线索', locked: true },
   ],
   pipelineRequirements: '',
-  pipelineThemeInput: '',
-  pipelineSettingInput: '',
-  pipelineProtagonistInput: '',
-  pipelineConflictInput: '',
-  pipelineStyleInput: '',
-  pipelineEndingInput: '',
-  pipelineExtraInput: '',
+  pipelineScriptFormat: 'movie',
+  pipelineMovieCoreIdea: '',
+  pipelineMovieProtagonist: '',
+  pipelineMovieConflict: '',
+  pipelineMovieTone: '',
+  pipelineSeriesPreviousEnding: '',
+  pipelineSeriesCharacterFocus: '',
+  pipelineSeriesToneDirection: '',
+  pipelineSeriesCliffhanger: '',
+  pipelineMicroHook: '',
+  pipelineMicroProtagonist: '',
+  pipelineMicroConflict: '',
+  pipelineMicroTone: '',
   pipelineCharacters: '',
   pipelineOutline: '',
   pipelineActiveStep: 0,
-  pipelineCurrentScene: 1,
+  pipelineLatestActReviewed: false,
   pipelineIsScriptEnd: false,
   pipelineCompletionReason: '',
+  pipelineCompletionSnapshot: null,
+  pipelineGenerationInFlight: false,
+  pipelineGenerationTargetAct: '',
   scriptContent: '',
 }
 
@@ -196,19 +223,27 @@ export function resetProjectWorkspace() {
 
 const fieldsToWatch = [
   () => globalState.scriptContent,
+  () => globalState.pipelineRequirements,
   () => globalState.pipelineCharacters,
   () => globalState.pipelineOutline,
-  () => globalState.pipelineThemeInput,
-  () => globalState.pipelineSettingInput,
-  () => globalState.pipelineProtagonistInput,
-  () => globalState.pipelineConflictInput,
-  () => globalState.pipelineStyleInput,
-  () => globalState.pipelineEndingInput,
-  () => globalState.pipelineExtraInput,
+  () => globalState.pipelineScriptFormat,
+  () => globalState.pipelineMovieCoreIdea,
+  () => globalState.pipelineMovieProtagonist,
+  () => globalState.pipelineMovieConflict,
+  () => globalState.pipelineMovieTone,
+  () => globalState.pipelineSeriesPreviousEnding,
+  () => globalState.pipelineSeriesCharacterFocus,
+  () => globalState.pipelineSeriesToneDirection,
+  () => globalState.pipelineSeriesCliffhanger,
+  () => globalState.pipelineMicroHook,
+  () => globalState.pipelineMicroProtagonist,
+  () => globalState.pipelineMicroConflict,
+  () => globalState.pipelineMicroTone,
   () => globalState.pipelineActiveStep,
-  () => globalState.pipelineCurrentScene,
+  () => globalState.pipelineLatestActReviewed,
   () => globalState.pipelineIsScriptEnd,
   () => globalState.pipelineCompletionReason,
+  () => globalState.pipelineCompletionSnapshot,
 ]
 
 let saveTimer = null

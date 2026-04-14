@@ -2,13 +2,13 @@
   <div class="editor-page">
     <section class="hero">
       <div>
-        <p class="kicker">Advanced Screenplay Editor</p>
-        <h1>高级编辑器</h1>
-        <p class="hero-copy">这一版把显性创作轨改成稳定的原生文本编辑区，修复左键选字、滚轮滚动、下一节拍停止条件和 AI 建议已应用提示。</p>
+        <p class="kicker">Visible Writing Track</p>
+        <h1>显性创作轨</h1>
+        <p class="hero-copy">这一版把显性创作轨改成稳定的原生文本编辑区，并把自动续写统一改成按幕推进，方便你继续生成下一幕或手动细化。</p>
       </div>
       <div class="hero-actions">
         <span class="chip">{{ statusText }}</span>
-        <el-button type="primary" :loading="loading" :disabled="!canGenerateNextBeat" @click="generateNextBeat">{{ nextBeatButtonText }}</el-button>
+        <el-button type="primary" :loading="loading" :disabled="!canGenerateNextAct" @click="generateNextAct">{{ nextActButtonText }}</el-button>
         <el-button plain @click="exportPdf">导出 PDF</el-button>
         <el-button plain @click="extractFingerprint">叙事指纹</el-button>
         <el-button plain @click="showVersionHistory = true">时光机（{{ versionHistory.length }}）</el-button>
@@ -25,14 +25,14 @@
         <strong>{{ contentStats.paragraphs }}</strong>
       </article>
       <article class="metric">
-        <span>大纲状态</span>
+        <span>剧本状态</span>
         <strong>{{ outlineStatusText }}</strong>
       </article>
     </section>
 
     <section v-if="locked" class="done-banner">
       <div>
-        <strong>剧本已到达当前收口点</strong>
+        <strong>{{ latestActReviewed ? '剧本已到达当前收口点' : '当前题材已生成到最后一幕' }}</strong>
         <p>{{ completionMessage }}</p>
       </div>
       <el-button type="success" plain @click="exportPdf">导出 PDF</el-button>
@@ -55,41 +55,87 @@
           <header class="card-head light">
             <div>
               <p class="kicker muted">AI Notes</p>
-              <h2>AI 修改建议</h2>
+              <h2>当前幕 AI 修改意见</h2>
             </div>
             <div class="advice-actions">
-              <el-button size="small" :loading="adviceLoading" @click="generateScriptAdvice">生成建议</el-button>
-              <el-button size="small" type="primary" plain :disabled="!pendingSuggestionCount" @click="applyAllAISuggestions">一键应用全部</el-button>
+              <el-button size="small" :loading="adviceLoading" @click="generateCurrentActReview">一键生成AI修改意见</el-button>
+              <el-button
+                v-if="currentActAnalysis?.has_issues && !currentActRevision"
+                size="small"
+                type="warning"
+                :loading="revisionLoading"
+                @click="generateCurrentActRevision"
+              >
+                一键生成修改版本
+              </el-button>
+              <el-button
+                v-if="currentActRevision"
+                size="small"
+                type="success"
+                :loading="applyingRevision"
+                @click="applyCurrentActRevision"
+              >
+                一键应用修改
+              </el-button>
             </div>
           </header>
 
           <div class="advice-body">
-            <p v-if="analysisSummary" class="summary">{{ analysisSummary }}</p>
-            <div v-if="suggestions.length" class="suggestion-list">
-              <article v-for="(item, idx) in suggestions" :key="item.id || idx" class="suggestion-item">
-                <div class="suggestion-top">
-                  <div>
-                    <p class="suggestion-type">{{ item.type || '结构优化' }}</p>
-                    <h3>{{ item.description || '建议调整这一段文本' }}</h3>
-                  </div>
-                  <span class="applied-badge" :class="{ active: item.applied }">{{ item.applied ? '已应用' : '待处理' }}</span>
+            <div v-if="currentActAnalysis" class="review-grid">
+              <article class="review-card">
+                <div class="review-card-head">
+                  <span>问题 1</span>
+                  <strong>当前幕是否完整覆盖本幕大纲</strong>
                 </div>
-                <div class="diff-grid">
-                  <div class="diff-block">
-                    <label>修改前</label>
-                    <pre>{{ item.before || '未提供原文片段' }}</pre>
-                  </div>
-                  <div class="diff-block after">
-                    <label>修改后</label>
-                    <pre>{{ item.after || '未提供建议文本' }}</pre>
-                  </div>
+                <p class="review-summary">{{ currentActAnalysis.missing_outline?.summary }}</p>
+                <div
+                  v-for="(item, idx) in currentActAnalysis.missing_outline?.items || []"
+                  :key="`editor-missing-${idx}`"
+                  class="review-row"
+                >
+                  <strong>缺失节点 {{ idx + 1 }}</strong>
+                  <p>{{ item.text }}</p>
                 </div>
-                <div class="suggestion-actions">
-                  <el-button size="small" type="primary" plain :loading="applyingSuggestionIdx === idx" :disabled="item.applied" @click="applyAISuggestion(item, idx)">{{ item.applied ? '已应用' : '应用这条建议' }}</el-button>
+                <p v-if="!(currentActAnalysis.missing_outline?.items || []).length" class="review-ok">
+                  这一方面没有明显问题。
+                </p>
+              </article>
+
+              <article class="review-card">
+                <div class="review-card-head">
+                  <span>问题 2</span>
+                  <strong>当前幕是否有脱离大纲的内容</strong>
                 </div>
+                <p class="review-summary">{{ currentActAnalysis.off_outline?.summary }}</p>
+                <div
+                  v-for="(item, idx) in currentActAnalysis.off_outline?.items || []"
+                  :key="`editor-off-outline-${idx}`"
+                  class="review-row"
+                >
+                  <strong>{{ item.problem }}</strong>
+                  <p>{{ item.reason }}</p>
+                  <pre v-if="item.snippet">{{ item.snippet }}</pre>
+                </div>
+                <p v-if="!(currentActAnalysis.off_outline?.items || []).length" class="review-ok">
+                  这一方面没有明显问题。
+                </p>
               </article>
             </div>
-            <el-empty v-else description="还没有生成 AI 建议。" />
+
+            <section v-if="currentActRevision" class="revision-box">
+              <div class="revision-box-head">
+                <div>
+                  <p class="kicker muted">AI Revision</p>
+                  <h3>当前幕修改版本</h3>
+                </div>
+                <span class="pill">
+                  可直接应用
+                </span>
+              </div>
+              <textarea :value="currentActRevision.revisedAct" class="revision-textarea" readonly />
+            </section>
+
+            <div v-else-if="!currentActAnalysis" />
           </div>
         </section>
       </div>
@@ -104,7 +150,7 @@
         </header>
         <div class="legend">
           <span><i class="dot character"></i>角色</span>
-          <span><i class="dot beat"></i>节拍</span>
+          <span><i class="dot scene"></i>场景</span>
           <span><i class="dot foreshadow"></i>伏笔</span>
         </div>
         <div ref="chartRef" class="chart"></div>
@@ -134,95 +180,94 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { analyzePlotWithAdvice } from '../api/ai'
-import { checkScriptCompletion, generateNextBeat as generateNextBeatAPI, syncNarrativeGraph } from '../api/narrative'
+import {
+  generateNextAct as generateNextActAPI,
+  reviewCurrentAct,
+  reviseCurrentAct,
+  syncNarrativeGraph,
+} from '../api/narrative'
 import { globalState } from '../stores/project'
+import { getRequestErrorMessage } from '../utils/apiError'
+import { getLockedCompletionNotice } from '../utils/completionText'
+import { formatActProgress, getCurrentActLabel, getNextActLabel } from '../utils/actProgress'
 import { openScreenplayPdfWindow } from '../utils/pdfExport'
+import { normalizeScriptText } from '../utils/scriptText'
 
 const AUTOSAVE_KEY = 'AI_SCREENPLAY_VERSIONS_V2'
 const router = useRouter()
 const chartRef = ref(null)
 
-const normalizeText = (text, trim = true) => {
-  if (!text) return ''
-  const normalized = String(text)
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/[#*_`]/g, '')
-    .replace(/\bEXT\.\s*/gi, '外景 ')
-    .replace(/\bINT\.\s*/gi, '内景 ')
-    .replace(/\n{3,}/g, '\n\n')
-  return trim ? normalized.trim() : normalized
-}
-
-const inferSceneCount = (text) => {
-  const normalized = normalizeText(text)
-  if (!normalized) return 0
-  const numbered = normalized.match(/^第\s*[一二三四五六七八九十百零\d]+\s*场/gm)
-  if (numbered?.length) return numbered.length
-  return normalized.match(/^(内景|外景)/gm)?.length || 0
-}
-
-const decorateSuggestions = (items = []) => items.map((item, idx) => ({ ...item, id: item.id || idx + 1, applied: Boolean(item.applied) }))
-
-const fallbackSuggestions = (text) => {
-  const lines = normalizeText(text).split('\n').map((line) => line.trim()).filter(Boolean)
-  if (!lines.length) return []
-  return decorateSuggestions([
-    { id: 1, type: '冲突优化', description: '让这一段的外部压力更明确，人物行动会更有戏剧张力。', before: lines[Math.min(2, lines.length - 1)] || '', after: `【冲突升级】${lines[Math.min(2, lines.length - 1)] || ''}，局势因此突然失控。` },
-    { id: 2, type: '人物动机', description: '补出主角此刻最想守住的东西，人物弧线会更清楚。', before: lines[Math.min(5, lines.length - 1)] || '', after: `【人物强化】${lines[Math.min(5, lines.length - 1)] || ''}，她第一次说出了自己真正害怕失去的东西。` },
-    { id: 3, type: '伏笔埋设', description: '提前埋一条会在结尾回收的线索，后续收口会更自然。', before: lines[Math.min(8, lines.length - 1)] || '', after: `【伏笔埋设】${lines[Math.min(8, lines.length - 1)] || ''}，一个不起眼的细节悄悄留下。` },
-  ])
-}
-
-const smartReplace = (originalText, searchText, replaceText) => {
-  if (!searchText || !replaceText) return originalText
-  if (originalText.includes(searchText)) return originalText.replace(searchText, replaceText)
-  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()
-  const normalizedSearch = normalize(searchText)
-  const lines = originalText.split('\n')
-  for (let i = 0; i < lines.length; i += 1) {
-    if (normalize(lines[i]).includes(normalizedSearch)) {
-      const nextLines = [...lines]
-      nextLines[i] = replaceText
-      return nextLines.join('\n')
-    }
-  }
-  return originalText
-}
+const normalizeText = (text, trim = true) => normalizeScriptText(text, { trim })
+const resolveRequestError = (error, fallbackText) => getRequestErrorMessage(error, fallbackText)
 
 const code = ref(normalizeText(globalState.scriptContent || '', false))
 const loading = ref(false)
 const showVersionHistory = ref(false)
 const versionHistory = ref([])
 const restoringVersion = ref(null)
-const analysisSummary = ref('')
-const suggestions = ref([])
+const currentActAnalysis = ref(null)
+const currentActRevision = ref(null)
 const adviceLoading = ref(false)
-const applyingSuggestionIdx = ref(-1)
-const completionState = ref(null)
+const revisionLoading = ref(false)
+const applyingRevision = ref(false)
+const completionState = ref(globalState.pipelineCompletionSnapshot || null)
+const scriptFormat = computed(() => globalState.pipelineScriptFormat || 'movie')
+const latestActReviewed = computed(() => Boolean(globalState.pipelineLatestActReviewed))
+const sharedGenerationBusy = computed(() => Boolean(globalState.pipelineGenerationInFlight))
+const generationBusy = computed(() => loading.value || sharedGenerationBusy.value)
+const generationInOtherView = computed(() => sharedGenerationBusy.value && !loading.value)
 
-const sceneCount = computed(() => inferSceneCount(code.value))
-const outlineCoveragePercent = computed(() => Math.round(Number(completionState.value?.outline_coverage || 0) * 100))
-const pendingSuggestionCount = computed(() => suggestions.value.filter((item) => !item.applied).length)
 const contentStats = computed(() => ({ characters: (code.value || '').length, paragraphs: (code.value || '').split('\n').map((line) => line.trim()).filter(Boolean).length }))
-const locked = computed(() => Boolean(globalState.pipelineIsScriptEnd || completionState.value?.is_complete))
+const hasOutline = computed(() => Boolean(normalizeText(globalState.pipelineOutline || '')))
+const completionLockedByState = computed(() => Boolean(
+  globalState.pipelineIsScriptEnd ||
+  completionState.value?.is_complete ||
+  completionState.value?.generation_locked ||
+  completionState.value?.can_continue === false
+))
+const currentActLabel = computed(() => getCurrentActLabel(completionState.value, code.value, scriptFormat.value))
+const nextActLabel = computed(() => getNextActLabel(completionState.value, scriptFormat.value, code.value))
+const locked = computed(() => completionLockedByState.value)
 const outlineStatusText = computed(() => {
-  if (locked.value) return '已完成收束'
-  if (!globalState.pipelineOutline) return `已写 ${sceneCount.value} 场`
-  if (outlineCoveragePercent.value > 0) return `已写 ${sceneCount.value} 场 · 覆盖 ${outlineCoveragePercent.value}%`
-  return `已写 ${sceneCount.value} 场 · 比对中`
+  if (!normalizeText(code.value)) return '尚未生成剧本'
+  return formatActProgress(completionState.value, code.value, {
+    scriptFormat: scriptFormat.value,
+    latestActReviewed: latestActReviewed.value,
+  })
 })
-const completionMessage = computed(() => completionState.value?.reason || globalState.pipelineCompletionReason || '已到达当前收口点，可以停止续写并导出 PDF。')
-const canGenerateNextBeat = computed(() => !loading.value && !locked.value && Boolean(normalizeText(code.value)))
-const nextBeatButtonText = computed(() => (locked.value ? '已完成，可导出 PDF' : '生成下一节拍'))
-const statusText = computed(() => (locked.value ? '已到达当前收口点' : loading.value ? '正在续写下一节拍' : '按大纲自动推进中'))
-const editorStatusText = computed(() => (locked.value ? '已停止续写' : loading.value ? '生成中' : '可编辑'))
+const lockedCompletionNotice = computed(() => getLockedCompletionNotice(
+  completionState.value || globalState.pipelineCompletionSnapshot || null,
+  latestActReviewed.value,
+))
+const completionMessage = computed(() => {
+  if (locked.value) return lockedCompletionNotice.value
+  return '当前剧本仍在推进中。'
+})
+const canGenerateNextAct = computed(() => !generationBusy.value && !locked.value && Boolean(normalizeText(code.value)))
+const nextActButtonText = computed(() => {
+  if (generationBusy.value) return `正在生成${globalState.pipelineGenerationTargetAct || nextActLabel.value || '下一幕'}`
+  if (locked.value) return latestActReviewed.value ? '已完结' : '已完结（未修改）'
+  return '生成下一幕'
+})
+const statusText = computed(() => {
+  if (loading.value) return `正在生成${nextActLabel.value || '下一幕'}`
+  if (generationInOtherView.value) return `正在生成${globalState.pipelineGenerationTargetAct || nextActLabel.value || '下一幕'}`
+  if (locked.value) return latestActReviewed.value ? '已完结，可生成 PDF' : '已完结（未修改）'
+  return outlineStatusText.value
+})
+const editorStatusText = computed(() => {
+  if (generationBusy.value) return '生成中'
+  if (locked.value) return latestActReviewed.value ? '已完结' : '已完结（未修改）'
+  return latestActReviewed.value ? '当前幕已确认' : '当前幕待复核'
+})
+
+const resetCurrentActAssistant = () => {
+  currentActAnalysis.value = null
+  currentActRevision.value = null
+}
 
 let myChart = null
 let syncTimer = null
-let completionTimer = null
-let completionToken = 0
 let lastSyncedContent = ''
 const getVersionPreview = (version) => normalizeText(version?.data?.scriptContent || version?.data?.pipelineRequirements || '暂无内容').slice(0, 180) || '暂无内容'
 
@@ -236,62 +281,35 @@ const refreshVersionHistory = () => {
   }
 }
 
-const syncProgress = (completion = null, sourceText = code.value) => {
-  completionState.value = completion
-  const countedScenes = Math.max(0, Number(completion?.scene_count ?? inferSceneCount(sourceText)))
-  const completed = Boolean(completion?.is_complete)
-  globalState.pipelineCurrentScene = completed ? Math.max(1, countedScenes) : Math.max(1, countedScenes + 1)
+const syncProgress = (completion = null) => {
+  const snapshot = completion ? { ...completion } : null
+  completionState.value = snapshot
+  globalState.pipelineCompletionSnapshot = snapshot
+  const generationLocked = Boolean(snapshot?.generation_locked || snapshot?.can_continue === false)
+  const completed = Boolean(snapshot?.is_complete || generationLocked)
   globalState.pipelineIsScriptEnd = completed
-  globalState.pipelineCompletionReason = String(completion?.reason || '')
+  globalState.pipelineCompletionReason = String(snapshot?.reason || '')
 }
 
-const refreshCompletionStatus = async (sourceText = code.value, silent = false) => {
+const refreshCompletionStatus = async (sourceText = code.value) => {
   const normalized = normalizeText(sourceText)
-  const token = ++completionToken
   if (!normalized) {
-    completionState.value = null
-    globalState.pipelineCurrentScene = 1
-    globalState.pipelineIsScriptEnd = false
-    globalState.pipelineCompletionReason = ''
+    syncProgress(null)
     return null
   }
-  try {
-    const response = await checkScriptCompletion(normalized, globalState.pipelineOutline || '')
-    if (token !== completionToken) return null
-    const completion = response.data?.completion || null
-    syncProgress(completion, normalized)
-    return completion
-  } catch (error) {
-    if (token !== completionToken) return null
-    if (!silent) console.error(error)
-    syncProgress(null, normalized)
-    return null
-  }
-}
-
-const queueCompletionRefresh = (content) => {
-  if (completionTimer) clearTimeout(completionTimer)
-  const normalized = normalizeText(content)
-  if (!normalized) {
-    completionState.value = null
-    globalState.pipelineCurrentScene = 1
-    globalState.pipelineIsScriptEnd = false
-    globalState.pipelineCompletionReason = ''
-    return
-  }
-  completionTimer = setTimeout(() => {
-    if (!loading.value) refreshCompletionStatus(normalized, true)
-  }, 1500)
+  const completion = globalState.pipelineCompletionSnapshot || completionState.value || null
+  syncProgress(completion)
+  return completion
 }
 
 const renderGraph = (graphData) => {
   if (!myChart) return
   const fallbackGraph = {
     nodes: [
-      { id: 'beat:当前场景', name: '当前场景', category: 1 },
+      { id: 'scene:当前场景', name: '当前场景', category: 1 },
       { id: 'char:主角', name: '主角', category: 0 },
     ],
-    links: [{ source: 'char:主角', target: 'beat:当前场景', name: '出现在' }],
+    links: [{ source: 'char:主角', target: 'scene:当前场景', name: '出现在' }],
   }
   const safeGraph = graphData?.nodes?.length ? graphData : fallbackGraph
   myChart.setOption({
@@ -309,7 +327,7 @@ const renderGraph = (graphData) => {
       edgeLabel: { show: true, fontSize: 10, formatter: '{c}', color: '#9eb0c8' },
       data: (safeGraph.nodes || []).map((node) => ({ ...node, symbolSize: node.category === 0 ? 54 : node.category === 2 ? 34 : 42 })),
       links: (safeGraph.links || []).map((link) => ({ ...link, value: link.name })),
-      categories: [{ name: '角色' }, { name: '节拍' }, { name: '伏笔' }],
+      categories: [{ name: '角色' }, { name: '场景' }, { name: '伏笔' }],
       lineStyle: { color: '#7f8da3', curveness: 0.12 },
     }],
   }, true)
@@ -360,9 +378,8 @@ const restoreToVersion = async (version) => {
     localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data))
     if (version.data) Object.assign(globalState, version.data)
     code.value = normalizeText(globalState.scriptContent || version.data?.scriptContent || '', false)
-    suggestions.value = []
-    analysisSummary.value = ''
-    await refreshCompletionStatus(code.value, true)
+    resetCurrentActAssistant()
+    syncProgress(globalState.pipelineCompletionSnapshot || version.data?.pipelineCompletionSnapshot || null)
     showVersionHistory.value = false
     ElMessage.success(`已恢复到 ${version.savedAtReadable}`)
   } catch (error) {
@@ -373,83 +390,194 @@ const restoreToVersion = async (version) => {
   }
 }
 
-const generateScriptAdvice = async () => {
+const generateCurrentActReview = async () => {
   const sourceText = normalizeText(code.value)
   if (!sourceText) {
-    ElMessage.warning('请先准备剧本文本，再生成 AI 建议。')
+    ElMessage.warning('请先准备当前幕正文，再生成 AI 修改意见。')
     return
   }
+
   adviceLoading.value = true
-  analysisSummary.value = ''
-  suggestions.value = []
+  currentActAnalysis.value = null
+  currentActRevision.value = null
   try {
-    const response = await analyzePlotWithAdvice(sourceText)
-    analysisSummary.value = normalizeText(response?.data?.analysis || '')
-    const items = response?.data?.suggestions || []
-    suggestions.value = decorateSuggestions(items.length ? items : fallbackSuggestions(sourceText))
-    ElMessage.success(`已生成 ${suggestions.value.length} 条可应用建议。`)
+    const response = await reviewCurrentAct(
+      sourceText,
+      globalState.pipelineOutline || '',
+      globalState.pipelineCharacters || '',
+      globalState.pipelineRequirements || '',
+      scriptFormat.value,
+    )
+    currentActAnalysis.value = response?.data?.analysis || null
+    if (!currentActAnalysis.value) {
+      throw new Error('当前幕问题分析结果为空')
+    }
+    if (currentActAnalysis.value.has_issues) {
+      globalState.pipelineLatestActReviewed = false
+      ElMessage.warning('已生成当前幕问题分析，可以继续一键生成修改版本。')
+    } else {
+      globalState.pipelineLatestActReviewed = true
+      ElMessage.success(locked.value ? lockedCompletionNotice.value : '当前幕两方面暂未发现明显问题。')
+    }
   } catch (error) {
     console.error(error)
-    analysisSummary.value = '模型建议暂时不可用，已切换到本地兜底建议。'
-    suggestions.value = fallbackSuggestions(sourceText)
-    ElMessage.success(`已生成 ${suggestions.value.length} 条本地兜底建议。`)
+    ElMessage.warning(resolveRequestError(error, '当前幕问题分析失败，请稍后重试。'))
   } finally {
     adviceLoading.value = false
   }
 }
-const applyAISuggestion = async (item, idx) => {
-  if (!item || item.applied) return
-  applyingSuggestionIdx.value = idx
-  await new Promise((resolve) => setTimeout(resolve, 250))
-  code.value = smartReplace(code.value, item.before, item.after)
-  suggestions.value[idx].applied = true
-  applyingSuggestionIdx.value = -1
-  ElMessage.success(`已应用第 ${idx + 1} 条 AI 建议。`)
-}
 
-const applyAllAISuggestions = async () => {
-  for (let i = 0; i < suggestions.value.length; i += 1) {
-    if (!suggestions.value[i]?.applied) await applyAISuggestion(suggestions.value[i], i)
-  }
-  ElMessage.success('当前建议已全部应用。')
-}
-
-const generateNextBeat = async () => {
-  const normalized = normalizeText(code.value)
-  if (!normalized) {
-    ElMessage.warning('请先准备剧本文本，再生成下一节拍。')
+const generateCurrentActRevision = async () => {
+  const sourceText = normalizeText(code.value)
+  if (!sourceText) {
+    ElMessage.warning('请先准备当前幕正文，再生成修改版本。')
     return
   }
-  const completionBefore = await refreshCompletionStatus(normalized, true)
+
+  if (!currentActAnalysis.value) {
+    ElMessage.warning('请先点击“一键生成AI修改意见”，确认当前幕问题后再生成修改版本。')
+    return
+  }
+
+  revisionLoading.value = true
+  currentActRevision.value = null
+  try {
+    const analysis = currentActAnalysis.value
+    if (!analysis) {
+      throw new Error('当前幕问题分析结果为空')
+    }
+
+    const response = await reviseCurrentAct(
+      sourceText,
+      globalState.pipelineOutline || '',
+      globalState.pipelineCharacters || '',
+      globalState.pipelineRequirements || '',
+      analysis,
+      scriptFormat.value,
+    )
+    currentActAnalysis.value = response?.data?.analysis || analysis
+    if (response?.data?.generated === false) {
+      currentActRevision.value = null
+      globalState.pipelineLatestActReviewed = true
+      ElMessage.success('当前幕暂时不需要生成修改版本。')
+      return
+    }
+    const revisedAct = normalizeText(response?.data?.revised_act || '')
+    const revisedContent = normalizeText(response?.data?.revised_content || '')
+    if (!revisedAct || !revisedContent) {
+      throw new Error('AI 没有返回可应用的修改版本')
+    }
+
+    currentActRevision.value = {
+      revisedAct,
+      revisedContent,
+      sourceText,
+      completion: response?.data?.completion || null,
+      warning: response?.data?.warning || '',
+      acceptedWithIssues: Boolean(response?.data?.accepted_with_issues),
+      generated: Boolean(response?.data?.generated),
+    }
+
+    ElMessage.success(
+      currentActRevision.value.acceptedWithIssues
+        ? 'AI 修改版本已生成，你可以先查看下面的版本，再决定是否替换当前正文。'
+        : 'AI 修改版本已生成，确认后可直接应用。'
+    )
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning(resolveRequestError(error, '当前幕修改版本生成失败，请稍后重试。'))
+  } finally {
+    revisionLoading.value = false
+  }
+}
+
+const applyCurrentActRevision = async () => {
+  if (!currentActRevision.value?.revisedContent) return
+  if (normalizeText(code.value) !== currentActRevision.value.sourceText) {
+    ElMessage.warning('当前幕正文已经变化，请重新生成修改版本，避免覆盖你刚刚的新改动。')
+    return
+  }
+
+  applyingRevision.value = true
+  try {
+    const revision = currentActRevision.value
+    if (!revision) return
+    code.value = normalizeText(revision.revisedContent, false)
+    globalState.scriptContent = normalizeText(code.value)
+    globalState.pipelineLatestActReviewed = !revision.acceptedWithIssues
+    syncProgress(revision.completion || completionState.value || null)
+    resetCurrentActAssistant()
+    ElMessage.success(
+      globalState.pipelineLatestActReviewed && locked.value
+        ? lockedCompletionNotice.value
+        : 'AI 修改版本已应用到当前幕。'
+    )
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('应用 AI 修改版本失败，请稍后重试。')
+  } finally {
+    applyingRevision.value = false
+  }
+}
+
+const generateNextAct = async () => {
+  const normalized = normalizeText(code.value)
+  if (!normalized) {
+    ElMessage.warning('请先准备剧本文本，再生成下一幕。')
+    return
+  }
   if (locked.value) {
-    syncProgress(completionBefore, normalized)
     ElMessage.info(completionMessage.value)
     return
   }
+  if (generationBusy.value && !loading.value) {
+    ElMessage.info(`当前正在生成${globalState.pipelineGenerationTargetAct || nextActLabel.value || '下一幕'}，请稍等。`)
+    return
+  }
   loading.value = true
+  globalState.pipelineGenerationInFlight = true
+  globalState.pipelineGenerationTargetAct = nextActLabel.value || '下一幕'
+  resetCurrentActAssistant()
   try {
-    const response = await generateNextBeatAPI(normalized, globalState.pipelineOutline || '', globalState.pipelineCharacters || '')
+    const response = await generateNextActAPI(
+      normalized,
+      globalState.pipelineOutline || '',
+      globalState.pipelineCharacters || '',
+      globalState.pipelineRequirements || '',
+      scriptFormat.value,
+    )
     const nextText = normalizeText(response.data?.text || '')
-    if (nextText) code.value = normalizeText(`${normalized}\n\n${nextText}`, false)
+    if (!nextText) {
+      syncProgress(response.data?.completion || completionState.value || null)
+      ElMessage.info(completionMessage.value)
+      return
+    }
+    code.value = normalizeText(`${normalized}\n\n${nextText}`, false)
+    globalState.scriptContent = normalizeText(code.value)
+    if (nextText) globalState.pipelineLatestActReviewed = false
     const mergedText = nextText ? code.value : normalized
-    syncProgress(response.data?.completion, mergedText)
+    syncProgress(response.data?.completion || null)
     if (response.data?.data) {
       renderGraph(response.data.data)
     } else {
       await syncGraph(mergedText)
     }
-    if (locked.value) {
+    if (response.data?.accepted_with_issues && nextText) {
+      ElMessage.warning('下一幕已生成，但系统检测到当前幕还可继续对齐大纲。可以先生成 AI 修改意见，再决定是否生成修改版本。')
+    } else if (locked.value) {
       ElMessage.success(completionMessage.value)
     } else if (nextText) {
-      ElMessage.success(`下一节拍已生成，当前状态：${outlineStatusText.value}。`)
+      ElMessage.success(`下一幕已生成，当前状态：${outlineStatusText.value}。`)
     } else {
-      ElMessage.warning('本次没有生成新的节拍内容，请稍后重试。')
+      ElMessage.warning('本次没有生成新的幕内容，请稍后重试。')
     }
   } catch (error) {
     console.error(error)
-    ElMessage.warning('生成下一节拍失败，请稍后重试。')
+    ElMessage.warning(resolveRequestError(error, '生成下一幕失败，请稍后重试。'))
   } finally {
     loading.value = false
+    globalState.pipelineGenerationInFlight = false
+    globalState.pipelineGenerationTargetAct = ''
   }
 }
 
@@ -472,7 +600,17 @@ watch(() => code.value, (newValue) => {
   const normalized = normalizeText(newValue)
   globalState.scriptContent = normalized
   queueGraphSync(normalized)
-  queueCompletionRefresh(normalized)
+})
+
+watch(() => globalState.scriptContent, (newValue) => {
+  const normalized = normalizeText(newValue || '', false)
+  if (normalized !== normalizeText(code.value, false)) {
+    code.value = normalized
+  }
+})
+
+watch(() => globalState.pipelineCompletionSnapshot, (value) => {
+  completionState.value = value ? { ...value } : null
 })
 
 watch(showVersionHistory, (open) => {
@@ -481,15 +619,14 @@ watch(showVersionHistory, (open) => {
 
 onMounted(async () => {
   globalState.scriptContent = normalizeText(code.value)
+  syncProgress(globalState.pipelineCompletionSnapshot || null)
   await initChart()
   refreshVersionHistory()
-  await refreshCompletionStatus(code.value, true)
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
   if (syncTimer) clearTimeout(syncTimer)
-  if (completionTimer) clearTimeout(completionTimer)
   window.removeEventListener('resize', handleResize)
   if (myChart) {
     myChart.dispose()
@@ -530,29 +667,31 @@ onUnmounted(() => {
 .editor-textarea { width: 100%; min-height: 720px; border: 0; padding: 24px; resize: none; outline: none; color: #f7f9ff; background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%), linear-gradient(180deg, #0f1827, #101a2a); font-size: 15px; line-height: 1.95; font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; overflow: auto; white-space: pre-wrap; word-break: break-word; user-select: text; cursor: text; }
 .editor-textarea::placeholder { color: rgba(222, 232, 246, 0.42); }
 .advice-body { padding: 18px 20px 22px; }
-.summary { margin: 0 0 16px; padding: 14px 16px; border-radius: 16px; background: rgba(16, 51, 92, 0.05); color: #4b5870; line-height: 1.8; }
-.suggestion-list, .version-list { display: grid; gap: 14px; }
-.suggestion-item, .version-card { padding: 16px; border-radius: 16px; border: 1px solid rgba(16, 51, 92, 0.08); background: #fff; }
-.suggestion-top, .version-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.suggestion-type { margin: 0 0 6px; font-size: 12px; color: #7d8799; letter-spacing: 0.08em; text-transform: uppercase; }
-.suggestion-top h3 { margin: 0; font-size: 16px; line-height: 1.6; color: #10233e; }
-.applied-badge { flex-shrink: 0; padding: 6px 12px; border-radius: 999px; background: #f3f5f9; color: #7c8798; font-size: 12px; font-weight: 700; }
-.applied-badge.active { background: #e9f7eb; color: #2f7d32; }
-.diff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-.diff-block { padding: 14px; border-radius: 14px; background: #f5f7fb; }
-.diff-block.after { background: #eef7ff; }
-.diff-block label { display: block; margin-bottom: 8px; font-size: 12px; color: #68768d; }
-.diff-block pre, .version-preview { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: #1b2c42; }
-.suggestion-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.review-grid, .version-list { display: grid; gap: 14px; margin-top: 16px; }
+.review-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.review-card, .version-card, .revision-box { padding: 16px; border-radius: 16px; border: 1px solid rgba(16, 51, 92, 0.08); background: #fff; }
+.review-card-head, .version-head, .revision-box-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.review-card-head span { flex-shrink: 0; padding: 6px 12px; border-radius: 999px; background: rgba(16, 51, 92, 0.06); color: #12406c; font-size: 12px; font-weight: 700; }
+.review-card-head strong { color: #10233e; font-size: 16px; line-height: 1.6; }
+.review-summary { margin: 12px 0 0; color: #4b5870; line-height: 1.8; font-size: 14px; }
+.review-row { margin-top: 12px; padding: 12px; border-radius: 14px; background: #f5f8fd; }
+.review-row strong { display: block; color: #10233e; font-size: 13px; }
+.review-row p { margin: 8px 0 0; color: #526178; line-height: 1.7; font-size: 13px; }
+.review-row pre, .version-preview { margin: 10px 0 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: #1b2c42; }
+.review-ok, .revision-tip { margin: 12px 0 0; color: #6c7c91; line-height: 1.7; font-size: 13px; }
+.revision-box { margin-top: 16px; background: linear-gradient(180deg, rgba(245, 249, 255, 0.96), rgba(255, 255, 255, 0.96)); }
+.revision-box h3 { margin: 6px 0 0; color: #10233e; }
+.revision-textarea { width: 100%; min-height: 280px; margin-top: 14px; padding: 16px; border: 1px solid rgba(16, 51, 92, 0.1); border-radius: 16px; background: #fff; color: #1b2c42; resize: vertical; line-height: 1.8; font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+.pill.warning { background: rgba(230, 162, 60, 0.14); color: #b36a0b; }
 .legend { display: flex; gap: 16px; padding: 14px 22px 0; color: #d0dbed; font-size: 13px; flex-wrap: wrap; }
 .dot { display: inline-block; width: 10px; height: 10px; margin-right: 8px; border-radius: 999px; }
 .dot.character { background: #4f8cff; }
-.dot.beat { background: #70f0a8; }
+.dot.scene { background: #70f0a8; }
 .dot.foreshadow { background: #f1d45a; }
 .chart { width: 100%; min-height: 1020px; padding: 10px 16px 18px; box-sizing: border-box; }
 .version-list { max-height: 520px; overflow-y: auto; }
 .version-card.latest { border-color: #67c23a; box-shadow: inset 0 0 0 1px rgba(103, 194, 58, 0.12); }
 .version-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-@media (max-width: 1280px) { .hero, .metrics, .layout, .diff-grid { grid-template-columns: 1fr; } .graph-card { position: static; min-height: 760px; } .chart { min-height: 700px; } }
-@media (max-width: 900px) { .editor-page { padding: 16px; } .hero, .done-banner, .card-head, .suggestion-top, .version-head { display: flex; flex-direction: column; align-items: flex-start; } .editor-textarea { min-height: 560px; padding: 18px; } .chart { min-height: 420px; } }
+@media (max-width: 1280px) { .hero, .metrics, .layout, .review-grid { grid-template-columns: 1fr; } .graph-card { position: static; min-height: 760px; } .chart { min-height: 700px; } }
+@media (max-width: 900px) { .editor-page { padding: 16px; } .hero, .done-banner, .card-head, .version-head, .review-card-head, .revision-box-head { display: flex; flex-direction: column; align-items: flex-start; } .editor-textarea { min-height: 560px; padding: 18px; } .chart { min-height: 420px; } }
 </style>

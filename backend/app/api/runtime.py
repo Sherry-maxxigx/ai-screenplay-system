@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.core.local_runtime import heartbeat, release
+from app.core.local_runtime import heartbeat
 
 
 router = APIRouter()
@@ -14,8 +14,3 @@ class RuntimeClientPayload(BaseModel):
 @router.post("/heartbeat")
 def runtime_heartbeat(payload: RuntimeClientPayload):
     return heartbeat(payload.client_id)
-
-
-@router.post("/release")
-def runtime_release(payload: RuntimeClientPayload):
-    return release(payload.client_id)

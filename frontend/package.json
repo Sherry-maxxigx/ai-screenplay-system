@@ -9,12 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@element-plus/icons-vue": "^2.3.1",
-    "@guolao/vue-monaco-editor": "^1.2.1",
     "axios": "^1.6.0",
     "echarts": "^5.5.0",
     "element-plus": "^2.4.4",
-    "monaco-editor": "^0.44.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.0",
     "vue-router": "^4.2.5"

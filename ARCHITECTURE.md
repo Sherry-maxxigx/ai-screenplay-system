@@ -6,11 +6,11 @@
 
 ## 技术栈
 
-- **前端**：Vue3 + Element Plus + Monaco Editor + ECharts
+- **前端**：Vue3 + Element Plus + ECharts
 - **后端**：Python FastAPI
-- **数据库**：MySQL 8.0 + MongoDB 6.0 + Milvus 2.2 + Neo4j 社区版
+- **数据层**：Neo4j（可选，用于叙事状态网络）
 - **AI能力**：GPT-4o + 智谱清言
-- **部署**：Docker容器化
+- **部署**：本地启动脚本 + 可选静态前端构建
 
 ## 核心创新点
 
@@ -22,9 +22,11 @@
 - **双内核协同**：规则引擎提供结构化约束，AI生成层提供创意内容，两者通过中间层实现协同
 
 **关键模块**：
-- `backend/app/core/narrative_engine.py`：叙事规则引擎
-- `backend/app/services/ai_service.py`：AI服务封装
-- `backend/app/models/graph.py`：Neo4j图数据库模型
+- `backend/app/api/ai.py`：人物、剧情大纲、首幕生成接口
+- `backend/app/api/narrative.py`：按幕续写、完成度判断、叙事状态同步
+- `backend/app/core/rule_engine.py`：叙事规则校验
+- `backend/app/core/story_constraints.py`：题设锚点抽取与对齐约束
+- `backend/app/models/neo4j_db.py`：叙事状态网络数据构建
 
 ### 2. 双轨联动的人机共生创作范式
 
@@ -34,9 +36,9 @@
 - **联动机制**：通过WebSocket实现实时同步，AI根据人工输入动态调整建议
 
 **关键模块**：
-- `frontend/src/components/ScreenplayEditor.vue`：剧本编辑器组件
-- `frontend/src/services/ai-assistant.js`：AI助手服务
-- `backend/app/api/collaboration.py`：协作API
+- `frontend/src/views/PipelineView.vue`：自动化工坊
+- `frontend/src/views/EditorView.vue`：显性创作轨
+- `backend/app/api/narrative.py`：幕生成、幕审查与修订API
 
 ### 3. 基于叙事指纹的剧本全链路价值保障体系
 
@@ -46,9 +48,8 @@
 - **价值评估**：建立层级化叙事结构评估体系，量化剧本质量
 
 **关键模块**：
-- `backend/app/core/fingerprint.py`：叙事指纹提取器
-- `backend/app/services/valuation.py`：剧本价值评估服务
-- `backend/app/models/vector.py`：Milvus向量模型
+- `backend/app/api/fingerprint.py`：叙事指纹接口
+- `frontend/src/views/FingerprintView.vue`：叙事指纹展示页
 
 ## 系统架构
 
@@ -131,10 +132,11 @@
 - `POST /api/narrative/apply-rule`：应用叙事规则
 
 ### AI服务
-- `POST /api/ai/generate`：AI内容生成
-- `POST /api/ai/function-call`：AI函数调用
-- `POST /api/ai/generate-script`：剧本生成
-- `POST /api/ai/analyze-plot`：剧情分析
+- `GET /api/ai/runtime-settings`：读取当前运行时模型配置
+- `POST /api/ai/runtime-settings`：保存当前运行时模型配置
+- `POST /api/ai/narrative/characters`：生成人物设定
+- `POST /api/ai/narrative/outline`：生成题材对应大纲
+- `POST /api/ai/narrative/script`：生成第一幕正文
 
 ## 启动步骤
 

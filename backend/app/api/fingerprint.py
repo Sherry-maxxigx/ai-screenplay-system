@@ -1,5 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter
 from pydantic import BaseModel
 import random
 import hashlib
@@ -22,14 +21,6 @@ async def check_originality(payload: ScriptPayload):
     # 1. 和原创性校验子库比对
     result = await fingerprint_system.evaluate_originality(fingerprint, payload.content)
     return result
-
-@router.post("/evaluate_professional")
-async def evaluate_professional(payload: ScriptPayload):
-    fingerprint = await fingerprint_system.extract_narrative_fingerprint(payload.content)
-    
-    # 2. 和专业评价子库比对
-    evaluation = await fingerprint_system.evaluate_professional(fingerprint)
-    return evaluation
 
 @router.post("/analyze_track")
 async def analyze_track(payload: ScriptPayload):

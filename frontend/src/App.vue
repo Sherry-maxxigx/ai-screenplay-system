@@ -12,7 +12,7 @@
 
         <nav class="nav-menu">
           <router-link to="/" class="nav-link">自动化工坊</router-link>
-          <router-link to="/editor" class="nav-link">高级编辑器</router-link>
+          <router-link to="/editor" class="nav-link">显性创作轨</router-link>
           <router-link to="/settings" class="nav-link">设置中心</router-link>
         </nav>
 

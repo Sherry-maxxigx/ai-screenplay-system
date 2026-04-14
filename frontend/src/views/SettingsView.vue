@@ -230,7 +230,7 @@ const saveMessage = ref('')
 const SETTINGS_CACHE_KEY = 'runtime_settings_cache_v1'
 
 const form = reactive({
-  modelBase: 'zhipu',
+  modelBase: 'deepseek',
   zhipuModel: 'glm-4-plus',
   openaiModel: 'gpt-4o',
   deepseekModel: 'deepseek-chat',
@@ -294,7 +294,7 @@ const providerReady = computed(() => {
 })
 
 function applySettings(data) {
-  form.modelBase = data.model_base || 'zhipu'
+  form.modelBase = data.model_base || 'deepseek'
   form.zhipuModel = data.zhipu_model || 'glm-4-plus'
   form.openaiModel = data.openai_model || 'gpt-4o'
   form.deepseekModel = data.deepseek_model || 'deepseek-chat'
@@ -345,6 +345,7 @@ function clearPendingKeys() {
 }
 
 function restoreRecommended() {
+  form.modelBase = 'deepseek'
   form.temperature = 0.75
   form.topP = 0.9
   form.safetyProvider = 'tencent'

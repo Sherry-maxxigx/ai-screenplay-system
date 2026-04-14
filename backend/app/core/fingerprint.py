@@ -119,24 +119,6 @@ class FingerprintSystem:
             "analysis_msg": analysis_msg
         }
         
-    async def evaluate_professional(self, fingerprint_vector: List[float]) -> dict:
-        """
-        专业评分与专家匹配 >= 92%
-        """
-        return {
-            "total_score": 93.8,
-            "dimensions": {
-                "人物弧光完整性": 95,
-                "叙事节拍符合度": 100,  # 强制要求达标
-                "隐性伏笔回收率": 96,   # 大于等于 95%
-                "冲突层级饱满度": 92
-            },
-            "scene_suggestions": [
-                {"scene_num": 5, "suggestion": "隐性叙事轨数据计算匹配度 92.4% -> 全局结构紧密。"}
-            ],
-            "expert_match_rate": "93.5%"
-        }
-        
     async def analyze_track(self, fingerprint_vector: List[float], target_track: str) -> dict:
         """
         可量化赛道适配与商业价值预判

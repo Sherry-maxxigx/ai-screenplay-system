@@ -53,12 +53,12 @@ class Neo4jDB:
         return {
             "nodes": [
                 {"id": "char:林澈", "name": "林澈", "category": 0},
-                {"id": "beat:当前场景", "name": "当前场景", "category": 1},
+                {"id": "scene:当前场景", "name": "当前场景", "category": 1},
                 {"id": "prop:旧怀表", "name": "旧怀表", "category": 2},
             ],
             "links": [
-                {"source": "char:林澈", "target": "beat:当前场景", "name": "出现在"},
-                {"source": "prop:旧怀表", "target": "beat:当前场景", "name": "关联线索"},
+                {"source": "char:林澈", "target": "scene:当前场景", "name": "出现在"},
+                {"source": "prop:旧怀表", "target": "scene:当前场景", "name": "关联线索"},
             ],
         }
 
@@ -160,7 +160,7 @@ class Neo4jDB:
         props = self._extract_props(cleaned)
 
         for scene in scenes:
-            scene_id = f"beat:{scene}"
+            scene_id = f"scene:{scene}"
             self._add_node(nodes, scene_id, scene, 1)
 
         for character in characters:
@@ -171,7 +171,7 @@ class Neo4jDB:
             prop_id = f"prop:{prop}"
             self._add_node(nodes, prop_id, prop, 2)
 
-        primary_scene_id = f"beat:{scenes[0]}"
+        primary_scene_id = f"scene:{scenes[0]}"
         for character in characters:
             self._add_link(links, f"char:{character}", primary_scene_id, "出现在")
 
@@ -179,7 +179,7 @@ class Neo4jDB:
             self._add_link(links, f"prop:{prop}", primary_scene_id, "关联线索")
 
         for scene in scenes[1:]:
-            self._add_link(links, primary_scene_id, f"beat:{scene}", "推进到")
+            self._add_link(links, primary_scene_id, f"scene:{scene}", "推进到")
 
         if len(characters) >= 2:
             self._add_link(links, f"char:{characters[0]}", f"char:{characters[1]}", "互动")
@@ -188,54 +188,6 @@ class Neo4jDB:
             "nodes": list(nodes.values()) or self._default_graph()["nodes"],
             "links": list(links.values()) or self._default_graph()["links"],
         }
-        return self.mock_graph
-
-    def get_graph_data(self):
-        self.connect()
-        if not self.driver:
-            return self.mock_graph
-
-        query = "MATCH (n) OPTIONAL MATCH (n)-[r]->(m) RETURN n, r, m"
-        nodes = []
-        links = []
-        node_ids = set()
-
-        try:
-            with self.driver.session() as session:
-                result = session.run(query)
-                for record in result:
-                    start = record["n"]
-                    relation = record["r"]
-                    end = record["m"]
-
-                    for node in [start, end]:
-                        if not node or node.element_id in node_ids:
-                            continue
-                        labels = list(node.labels)
-                        if "Character" in labels:
-                            category = 0
-                        elif "Foreshadowing" in labels or "Prop" in labels:
-                            category = 2
-                        else:
-                            category = 1
-                        name = node.get("name") or node.get("id") or str(node.element_id)
-                        nodes.append({"id": str(node.element_id), "name": name, "category": category})
-                        node_ids.add(node.element_id)
-
-                    if relation and start and end:
-                        links.append(
-                            {
-                                "source": str(start.element_id),
-                                "target": str(end.element_id),
-                                "name": relation.type,
-                            }
-                        )
-
-            if nodes:
-                return {"nodes": nodes, "links": links}
-        except Exception as exc:
-            logging.warning("Neo4j query failed, fallback to parsed mock graph: %s", exc)
-
         return self.mock_graph
 
     def simulate_function_call_update(self, text: str):

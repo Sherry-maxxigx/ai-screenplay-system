@@ -1,17 +1,12 @@
-from pathlib import Path
 import os
-import sys
 
 import uvicorn
 
 
-BACKEND_DIR = Path(__file__).resolve().parent
-LEGACY_SITE_PACKAGES = BACKEND_DIR.parent / ".venv_broken" / "Lib" / "site-packages"
+from pathlib import Path
 
-if LEGACY_SITE_PACKAGES.exists():
-    legacy_path = str(LEGACY_SITE_PACKAGES)
-    if legacy_path not in sys.path:
-        sys.path.append(legacy_path)
+
+BACKEND_DIR = Path(__file__).resolve().parent
 
 os.chdir(BACKEND_DIR)
 

@@ -1,35 +1,85 @@
 import json
+import math
 import re
 from difflib import SequenceMatcher
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.api.ai import enforce_script_labels, generate_clean_content
-from app.core.narrative_engine import NarrativeGenerator
+from app.api.ai import enforce_script_labels, generate_clean_content, generate_clean_content_with_meta
+from app.core.script_formats import (
+    DEFAULT_SCRIPT_FORMAT,
+    build_act_label_pattern,
+    build_all_act_label_pattern,
+    get_act_index,
+    get_act_sequence,
+    get_last_act_label,
+    get_next_act_label,
+    get_script_format_label,
+    normalize_script_format,
+)
+from app.core.story_constraints import (
+    CLUE_TERMS,
+    MISSION_VERBS,
+    RELATION_TERMS,
+    ROLE_SUFFIXES,
+    SETTING_SUFFIXES,
+    build_story_guardrail_block,
+    evaluate_story_alignment,
+    extract_story_anchor_groups,
+)
 from app.models.neo4j_db import neo4j_client
 
 router = APIRouter()
-narrative_gen = NarrativeGenerator()
+ACT_LABEL_PATTERN = build_all_act_label_pattern()
+
+
+def _build_generation_review_validation(
+    *,
+    is_valid: bool,
+    reason: str = "",
+    corrected: bool = False,
+    accepted_with_issues: bool = False,
+) -> dict[str, Any]:
+    message = (reason or "").strip()
+    hard_errors = []
+    soft_warnings = []
+    if message and not is_valid:
+        hard_errors.append(
+            {
+                "description": message,
+                "fix_instruction": "可先保留当前正文，再使用“一键生成修改建议”继续优化这一场。",
+            }
+        )
+
+    if accepted_with_issues and hard_errors:
+        soft_warnings = hard_errors
+        hard_errors = []
+
+    return {
+        "is_valid": is_valid,
+        "hard_errors": hard_errors,
+        "soft_warnings": soft_warnings,
+        "metrics": {},
+        "corrected": corrected,
+        "accepted_with_issues": accepted_with_issues,
+    }
 
 ENDING_KEYWORDS = [
     "结局",
     "结尾",
     "尾声",
     "余韵",
-    "真相",
     "揭晓",
     "落幕",
     "收束",
-    "结束",
     "终于",
     "最后",
-    "清晨",
-    "天亮",
     "告别",
     "代价",
-    "选择",
+    "终章",
+    "尘埃落定",
 ]
 
 FORESHADOW_KEYWORDS = [
@@ -76,6 +126,71 @@ OUTLINE_STOPWORDS = {
     "以及",
 }
 
+INTERNAL_SCAFFOLD_PREFIXES = (
+    "上一场位于：",
+    "当前目标：",
+    "校验备注：",
+    "推进说明：",
+    "关键对白：",
+    "动作描述：",
+    "承接上节：",
+    "承接上场：",
+)
+
+INTERNAL_SCAFFOLD_HEADINGS = {
+    "承接上场",
+    "承接上节",
+    "动作描述",
+    "推进说明",
+    "关键对白",
+}
+
+INTERNAL_SCAFFOLD_FRAGMENTS = (
+    "没有停留在上一场的情绪里",
+    "局势因此发生了不可逆的变化",
+    "埋下了更具体的后果",
+    "没有真正推进当前应写的大纲节点",
+    "这一次，我们不能再原地打转了。",
+)
+
+
+def _normalize_act_label(label: str) -> str:
+    return str(label or "").strip()
+
+
+def _ordered_unique_labels(labels: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for label in labels:
+        normalized = _normalize_act_label(label)
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    return ordered
+
+
+def _next_act_label_after(label: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> str:
+    return get_next_act_label(label, script_format)
+
+
+def _extract_written_act_labels(text: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> list[str]:
+    cleaned = _normalize_script(text)
+    if not cleaned:
+        return []
+
+    act_label_pattern = build_act_label_pattern(script_format)
+    labels = [
+        _normalize_act_label(match.group(1))
+        for match in re.finditer(
+            rf"^{act_label_pattern}[·.、 ]?第[一二三四五六七八九十百零\d]+节$",
+            cleaned,
+            flags=re.MULTILINE,
+        )
+    ]
+    return _ordered_unique_labels(labels)
+
+
+def _count_non_whitespace(text: str) -> int:
+    return len(re.sub(r"\s+", "", _normalize_script(text)))
+
 
 def _build_requirement_text(requirements: dict[str, Any]) -> str:
     req_text = (requirements.get("content") or "").strip()
@@ -117,6 +232,42 @@ def _normalize_script(text: str) -> str:
     return cleaned.strip()
 
 
+def _looks_like_dialogue_speaker(line: str) -> bool:
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,6}", (line or "").strip()))
+
+
+def _is_internal_scaffold_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if stripped in INTERNAL_SCAFFOLD_HEADINGS:
+        return True
+    if any(stripped.startswith(prefix) for prefix in INTERNAL_SCAFFOLD_PREFIXES):
+        return True
+    return any(fragment in stripped for fragment in INTERNAL_SCAFFOLD_FRAGMENTS)
+
+
+def _contains_internal_scaffolding(text: str) -> bool:
+    return any(_is_internal_scaffold_line(line) for line in _normalize_script(text).split("\n"))
+
+
+def _strip_internal_scaffolding(text: str) -> str:
+    normalized = _normalize_script(text)
+    if not normalized:
+        return ""
+
+    kept_lines: list[str] = []
+    for raw_line in normalized.split("\n"):
+        stripped = raw_line.strip()
+        if _is_internal_scaffold_line(stripped):
+            if kept_lines and _looks_like_dialogue_speaker(kept_lines[-1]):
+                kept_lines.pop()
+            continue
+        kept_lines.append(raw_line.rstrip())
+
+    return _normalize_script("\n".join(kept_lines))
+
+
 def _normalize_match_text(text: str) -> str:
     normalized = _normalize_script(text)
     normalized = re.sub(r"\s+", "", normalized)
@@ -130,18 +281,13 @@ def _clean_outline_line(raw_line: str) -> str:
     return line.strip("：: ")
 
 
-def _detect_outline_section_label(line: str) -> str:
+def _detect_outline_section_label(line: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> str:
     if not line:
         return ""
 
-    if "第一幕" in line:
-        return "第一幕"
-    if "第二幕" in line:
-        return "第二幕"
-    if "第三幕" in line:
-        return "第三幕"
-    if any(keyword in line for keyword in ("结局", "结尾", "尾声", "高潮")):
-        return "结局"
+    for act_label in get_act_sequence(script_format):
+        if act_label in line:
+            return act_label
     return ""
 
 
@@ -149,122 +295,24 @@ def _strip_outline_section_heading(line: str, section_label: str) -> str:
     if not line or not section_label:
         return line
 
-    if section_label == "结局":
-        return re.sub(r"^(结局|结尾|尾声|高潮)[：:\s-]*", "", line).strip()
-
-    return re.sub(rf"^{section_label}[：:\s-]*", "", line).strip()
+    return re.sub(rf"^{re.escape(section_label)}[：:\s-]*", "", line).strip()
 
 
-def _looks_like_outline_heading(line: str) -> bool:
+def _looks_like_outline_heading(line: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> bool:
     stripped = (line or "").strip("：: ")
     if not stripped:
         return True
 
-    if stripped in {"三幕式剧情大纲", "剧情大纲", "故事大纲", "第一幕", "第二幕", "第三幕", "结局", "结尾", "尾声", "高潮"}:
+    if stripped in {"剧情大纲", "故事大纲", "分幕大纲", "分集大纲"}:
+        return True
+
+    if stripped in set(get_act_sequence(script_format)):
         return True
 
     if re.fullmatch(r"第\s*[一二三四五六七八九十百零\d]+\s*幕", stripped):
         return True
 
     return False
-
-
-def _looks_like_outline_meta(line: str) -> bool:
-    stripped = (line or "").strip()
-    if not stripped:
-        return False
-
-    meta_keywords = ("建议", "说明", "提示", "要求", "风格", "写法", "格式")
-    plot_keywords = ("主角", "反派", "真相", "结局", "高潮", "事故", "线索", "选择", "代价", "冲突")
-    return any(keyword in stripped for keyword in meta_keywords) and not any(
-        keyword in stripped for keyword in plot_keywords
-    )
-
-
-def _split_outline_segments(line: str) -> list[str]:
-    raw = _normalize_script(line)
-    if not raw:
-        return []
-
-    primary_parts = [
-        part.strip(" ，,；;：:")
-        for part in re.split(r"[。！？；]+", raw)
-        if part.strip(" ，,；;：:")
-    ]
-    segments: list[str] = []
-
-    for part in primary_parts or [raw]:
-        comma_parts = [
-            chunk.strip(" ，,；;：:")
-            for chunk in re.split(r"[，,]", part)
-            if chunk.strip(" ，,；;：:")
-        ]
-        if len(comma_parts) >= 2 and len(_normalize_match_text(part)) >= 18:
-            long_chunks = [chunk for chunk in comma_parts if len(_normalize_match_text(chunk)) >= 6]
-            if len(long_chunks) >= 2:
-                segments.extend(long_chunks)
-                continue
-        segments.append(part)
-
-    cleaned_segments: list[str] = []
-    seen: set[str] = set()
-
-    for segment in segments:
-        segment = re.sub(r"^(这一幕|本幕|随后|接着|然后|最终|最后)[：:\s]*", "", segment)
-        segment = segment.strip(" ，,；;：:")
-        if not segment or _looks_like_outline_heading(segment) or _looks_like_outline_meta(segment):
-            continue
-
-        normalized = _normalize_match_text(segment)
-        if len(normalized) < 6 or normalized in seen:
-            continue
-
-        seen.add(normalized)
-        cleaned_segments.append(segment)
-
-    if cleaned_segments:
-        return cleaned_segments
-
-    if _looks_like_outline_meta(raw):
-        return []
-    return [raw] if len(_normalize_match_text(raw)) >= 6 else []
-
-
-def _extract_outline_items(outline: str) -> list[dict[str, str]]:
-    text = _normalize_script(outline)
-    if not text:
-        return []
-
-    items: list[dict[str, str]] = []
-    seen: set[str] = set()
-    current_section = ""
-
-    for raw_line in text.split("\n"):
-        line = _clean_outline_line(raw_line)
-        if not line:
-            continue
-
-        section_label = _detect_outline_section_label(line)
-        if section_label:
-            current_section = section_label
-            line = _strip_outline_section_heading(line, section_label)
-            if not line:
-                continue
-
-        if _looks_like_outline_heading(line):
-            continue
-
-        keywords = _extract_focus_keywords(line, limit=6)
-        if len(keywords) < 2 and len(line) < 12:
-            continue
-
-        key = f"{current_section}|{line}"
-        if key in seen:
-            continue
-        seen.add(key)
-        items.append({"section": current_section or "剧情推进", "text": line})
-
-    return items
 
 
 def _extract_keyword_matches(reference: str, text: str, limit: int = 6) -> tuple[list[str], list[str], float]:
@@ -275,57 +323,6 @@ def _extract_keyword_matches(reference: str, text: str, limit: int = 6) -> tuple
     matched = [keyword for keyword in keywords if keyword in text]
     coverage = len(matched) / len(keywords)
     return keywords, matched, coverage
-
-
-def _is_outline_item_covered(item_text: str, content: str) -> bool:
-    keywords, matched, coverage = _extract_keyword_matches(item_text, content)
-    if not keywords:
-        return False
-
-    if len(matched) >= min(2, len(keywords)):
-        return True
-
-    return coverage >= 0.5
-
-
-def _extract_outline_progress(outline: str, content: str) -> dict[str, Any]:
-    items = _extract_outline_items(outline)
-    covered_items: list[dict[str, Any]] = []
-    pending_items: list[dict[str, Any]] = []
-
-    for item in items:
-        keywords, matched_keywords, coverage = _extract_keyword_matches(item["text"], content)
-        enriched = {
-            **item,
-            "keywords": keywords,
-            "matched_keywords": matched_keywords,
-            "coverage": coverage,
-        }
-        if _is_outline_item_covered(item["text"], content):
-            covered_items.append(enriched)
-        else:
-            pending_items.append(enriched)
-
-    section_label = ""
-    section_index = 1
-    if pending_items:
-        section_label = pending_items[0]["section"]
-        section_index = len([item for item in covered_items if item["section"] == section_label]) + 1
-    elif covered_items:
-        section_label = covered_items[-1]["section"]
-        section_index = len([item for item in covered_items if item["section"] == section_label])
-
-    return {
-        "items": items,
-        "covered_items": covered_items,
-        "pending_items": pending_items,
-        "covered_points": [item["text"] for item in covered_items],
-        "pending_points": [item["text"] for item in pending_items],
-        "current_target": pending_items[0]["text"] if pending_items else "",
-        "next_target": pending_items[1]["text"] if len(pending_items) > 1 else "",
-        "section_label": section_label,
-        "section_index": max(1, section_index),
-    }
 
 
 def _extract_scene_blocks(text: str) -> list[str]:
@@ -370,12 +367,12 @@ def _shared_line_count(left: str, right: str) -> int:
     left_lines = {
         line.strip()
         for line in _normalize_script(left).split("\n")
-        if len(line.strip()) >= 8 and not line.strip().startswith(("第一幕", "第二幕", "第三幕", "结局"))
+        if len(line.strip()) >= 8 and not re.match(rf"^{ACT_LABEL_PATTERN}", line.strip())
     }
     right_lines = {
         line.strip()
         for line in _normalize_script(right).split("\n")
-        if len(line.strip()) >= 8 and not line.strip().startswith(("第一幕", "第二幕", "第三幕", "结局"))
+        if len(line.strip()) >= 8 and not re.match(rf"^{ACT_LABEL_PATTERN}", line.strip())
     }
     return len(left_lines & right_lines)
 
@@ -441,85 +438,178 @@ def _build_outline_digest(items: list[dict[str, Any]], empty_text: str, limit: i
     return "\n".join(digest_lines)
 
 
-def _resolve_next_act_context(outline: str, content: str, beat_index: int) -> dict[str, Any]:
-    outline_progress = _extract_outline_progress(outline, content)
-    section_label = outline_progress.get("section_label") or ""
-    section_index = int(outline_progress.get("section_index") or 1)
-    current_target = outline_progress.get("current_target") or ""
-    next_target = outline_progress.get("next_target") or ""
+def _resolve_next_act_context(
+    outline: str,
+    content: str,
+    start_scene_index: int,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    outline_progress = _extract_outline_progress(outline, content, script_format=script_format)
+    pending_items = outline_progress.get("pending_items", [])
+    covered_items = outline_progress.get("covered_items", [])
+    written_act_labels = _extract_written_act_labels(content, script_format)
+    act_sequence = get_act_sequence(script_format)
+    last_act_label = get_last_act_label(script_format)
 
-    if not section_label:
-        section_label, section_index = _get_act_label(beat_index)
+    act_label = ""
+    if written_act_labels:
+        act_label = _next_act_label_after(written_act_labels[-1], script_format) or written_act_labels[-1]
+    elif pending_items:
+        act_label = _normalize_act_label(pending_items[0].get("section") or "")
+    else:
+        act_label = _get_fallback_act_label(start_scene_index, script_format)
+
+    if not act_label:
+        act_label = act_sequence[0] if act_sequence else "第一幕"
+
+    act_pending_items = [
+        item for item in pending_items if _normalize_act_label(item.get("section") or "") == act_label
+    ]
+    act_completed_items = [
+        item for item in covered_items if _normalize_act_label(item.get("section") or "") == act_label
+    ]
+
+    next_act_label = _next_act_label_after(act_label, script_format)
+
+    current_target = act_pending_items[0]["text"] if act_pending_items else ""
+    next_target = act_pending_items[1]["text"] if len(act_pending_items) > 1 else ""
 
     if outline.strip() and not current_target:
-        section_label = "结局"
-        section_index = max(1, section_index)
-        current_target = "完成整部剧的结尾收束，回收主要伏笔，交代最终选择带来的后果。"
-        if not next_target:
-            next_target = "用最后的画面、动作或对白留下余韵。"
+        if act_label == last_act_label:
+            current_target = f"完成{last_act_label}的最终收束，回收主要伏笔，交代最后选择带来的后果。"
+            next_target = next_target or "本题材所有幕次写完后停止续写。"
+        else:
+            current_target = f"完整写完{act_label}，让这一幕内部的冲突和推进自然收口。"
 
     return {
         "outline_progress": outline_progress,
-        "section_label": section_label,
-        "section_index": section_index,
+        "act_label": act_label,
+        "section_label": act_label,
+        "section_index": max(1, len(act_completed_items) + 1),
         "current_target": current_target,
         "next_target": next_target,
+        "act_pending_items": act_pending_items,
+        "act_completed_items": act_completed_items,
+        "next_act_label": next_act_label,
     }
 
 
-def _validate_generated_beat(candidate: str, content: str, outline_progress: dict[str, Any]) -> dict[str, Any]:
-    repetition = _detect_recent_repetition(content, candidate)
-    if repetition.get("repetition_detected"):
-        return {"ok": False, "reason": repetition.get("reason") or "新场次与最近内容重复"}
+def _coerce_generated_act_format(
+    candidate: str,
+    act_label: str,
+    section_index: int,
+    start_scene_index: int,
+    fallback_heading: str,
+) -> str:
+    cleaned = _strip_internal_scaffolding(candidate)
+    if not cleaned:
+        return ""
 
-    current_target = outline_progress.get("current_target") or ""
-    if current_target and not _is_outline_item_covered(current_target, candidate):
-        return {"ok": False, "reason": f"新场次没有真正推进当前应写的大纲节点：{current_target}"}
+    normalized = enforce_script_labels(
+        cleaned,
+        default_act_label=act_label,
+        start_scene_index=start_scene_index,
+        max_sections=3,
+        single_act=True,
+    )
+    if not normalized and fallback_heading:
+        return f"{act_label}·第{section_index}节\n第{start_scene_index}场\n{fallback_heading}"
+    return _normalize_script(normalized)
 
-    return {"ok": True, "reason": ""}
+
+def _response_was_truncated(response_meta: Optional[dict[str, Any]]) -> bool:
+    finish_reason = str((response_meta or {}).get("finish_reason") or "").strip().lower()
+    return finish_reason in {"length", "max_tokens"}
 
 
-def _build_retry_prompt(base_prompt: str, fail_reason: str, current_target: str, next_target: str) -> str:
-    retry_lines = [
-        "上一版续写失败，请完全重写本场，不得沿用上一版的对白、动作和场景铺陈。",
-        f"失败原因：{fail_reason}",
-    ]
+def _merge_continuation_text(existing: str, addition: str) -> str:
+    base = _normalize_script(existing).rstrip()
+    incoming = _normalize_script(addition).strip()
+    if not base:
+        return incoming
+    if not incoming:
+        return base
+    if incoming in base:
+        return base
 
-    if current_target:
-        retry_lines.append(f"这一次必须实质推进的大纲节点：{current_target}")
-    if next_target:
-        retry_lines.append(f"推进完当前节点后，可以顺手为下一节点埋桥：{next_target}")
+    overlap = 0
+    max_overlap = min(len(base), len(incoming), 240)
+    for size in range(max_overlap, 19, -1):
+        if base[-size:] == incoming[:size]:
+            overlap = size
+            break
 
-    retry_lines.extend(
-        [
-            "如果仍然回到相同地点，必须发生新的信息揭示、新障碍或新后果。",
-            "不要为了拖长篇幅重复情绪、重复台词或重复场景标题。",
-        ]
+    if overlap:
+        incoming = incoming[overlap:].lstrip()
+        if not incoming:
+            return base
+
+    separator = ""
+    if not base.endswith("\n"):
+        if incoming.startswith(("第", "内景", "外景")) or base[-1] in "。！？…）”’》":
+            separator = "\n"
+
+    return f"{base}{separator}{incoming}"
+
+
+def _build_act_continuation_prompt(base_prompt: str, act_label: str, partial_text: str) -> str:
+    excerpt = _normalize_script(partial_text)[-2600:]
+    return (
+        f"{base_prompt}\n\n"
+        f"上一次输出在{act_label}中途因为长度限制停下了。下面是已经写出的当前幕正文，请严格接着它继续写完当前这一幕。\n"
+        "不要重写前文，不要改写已经生成好的部分，不要跳去下一幕。\n"
+        "如果最后一句停在半句，请先把这句话补完整，再继续往下写。\n"
+        "只输出这次新增的续写正文，不要解释。\n\n"
+        f"已写出的{act_label}正文：\n{excerpt}"
     )
 
-    return f"{base_prompt}\n\n补充硬性要求：\n" + "\n".join(f"{index + 1}. {line}" for index, line in enumerate(retry_lines))
+
+def _generate_complete_act_candidate(
+    prompt: str,
+    *,
+    act_label: str,
+    section_index: int,
+    start_scene_index: int,
+    fallback_heading: str,
+    max_tokens: int = 4200,
+    max_passes: int = 4,
+) -> str:
+    assembled = ""
+    current_prompt = prompt
+
+    for _ in range(max_passes):
+        try:
+            generated, _, response_meta = generate_clean_content_with_meta(current_prompt, max_tokens=max_tokens)
+        except Exception:
+            if assembled:
+                break
+            raise
+
+        chunk = _strip_internal_scaffolding(generated)
+        if not chunk.strip():
+            if assembled:
+                break
+            return ""
+
+        assembled = _merge_continuation_text(assembled, chunk)
+        if not _response_was_truncated(response_meta):
+            break
+
+        current_prompt = _build_act_continuation_prompt(prompt, act_label, assembled)
+
+    return _coerce_generated_act_format(
+        assembled,
+        act_label=act_label,
+        section_index=section_index,
+        start_scene_index=start_scene_index,
+        fallback_heading=fallback_heading,
+    )
 
 
 def _extract_latest_scene(text: str) -> str:
     lines = [line.strip() for line in _normalize_script(text).split("\n") if line.strip()]
     scene_lines = [line for line in lines if line.startswith(("内景", "外景"))]
     return scene_lines[-1] if scene_lines else "内景 临时空间 夜"
-
-
-def _extract_primary_character(text: str) -> str:
-    cleaned = _normalize_script(text)
-    names = re.findall(r"^([\u4e00-\u9fff]{2,6})[:：]", cleaned, flags=re.MULTILINE)
-    blocked = {"内景", "外景", "画外音", "动作描述", "承接上场", "承接上节", "推进说明", "关键对白"}
-    for name in names:
-        if name not in blocked:
-            return name
-
-    tokens = re.findall(r"[\u4e00-\u9fff]{2,3}", cleaned)
-    for token in tokens:
-        if token not in blocked:
-            return token
-
-    return "主角"
 
 
 def _extract_recent_prop(text: str) -> str:
@@ -529,7 +619,7 @@ def _extract_recent_prop(text: str) -> str:
     return "线索"
 
 
-def _infer_next_scene_title(current_scene: str, beat_index: int) -> str:
+def _infer_next_scene_title(current_scene: str, scene_index: int) -> str:
     if "港口" in current_scene:
         return "内景 科考船舱 夜"
     if "公寓" in current_scene:
@@ -538,12 +628,12 @@ def _infer_next_scene_title(current_scene: str, beat_index: int) -> str:
         return "内景 研究站走廊 夜"
     if "船舱" in current_scene:
         return "外景 研究站平台 夜"
-    if beat_index % 2 == 0:
+    if scene_index % 2 == 0:
         return "外景 暴雨甲板 夜"
     return "内景 临时控制室 夜"
 
 
-def _extract_next_beat_index(text: str) -> int:
+def _extract_next_scene_index(text: str) -> int:
     arabic_hits = [int(item) for item in re.findall(r"第\s*(\d+)\s*场", text)]
     if arabic_hits:
         return max(arabic_hits) + 1
@@ -571,24 +661,37 @@ def _extract_next_beat_index(text: str) -> int:
     return len(re.findall(r"^(内景|外景)", text, flags=re.MULTILINE)) + 1
 
 
-def _build_progression_hint(beat_index: int) -> str:
+def _build_progression_hint(scene_index: int) -> str:
     hints = [
         "线索由‘异常现象’升级为‘人为布局’，主角开始怀疑内部有人提前布控。",
         "主角不再被动调查，转为主动设局试探同伴，人物关系开始出现裂痕。",
         "旧案与当下危机正式重叠，主角必须在‘保命’和‘揭真相’之间二选一。",
         "前一场留下的道具被反向利用，推动剧情进入不可逆阶段。",
     ]
-    return hints[(beat_index - 1) % len(hints)]
+    return hints[(scene_index - 1) % len(hints)]
 
 
-def _get_act_label(beat_index: int) -> tuple[str, int]:
-    if beat_index <= 3:
-        return "第一幕", beat_index
-    if beat_index <= 7:
-        return "第二幕", beat_index - 3
-    if beat_index <= 10:
-        return "第三幕", beat_index - 7
-    return "结局", beat_index - 10
+def _get_fallback_act_label(scene_index: int, script_format: str = DEFAULT_SCRIPT_FORMAT) -> str:
+    act_sequence = get_act_sequence(script_format)
+    if not act_sequence:
+        return "第一幕"
+
+    if len(act_sequence) == 2:
+        return act_sequence[0] if scene_index <= 4 else act_sequence[1]
+    if len(act_sequence) == 3:
+        if scene_index <= 4:
+            return act_sequence[0]
+        if scene_index <= 8:
+            return act_sequence[1]
+        return act_sequence[2]
+
+    if scene_index <= 3:
+        return act_sequence[0]
+    if scene_index <= 6:
+        return act_sequence[1]
+    if scene_index <= 9:
+        return act_sequence[2]
+    return act_sequence[-1]
 
 
 def _extract_last_dialogue_hint(text: str) -> str:
@@ -601,26 +704,19 @@ def _extract_last_dialogue_hint(text: str) -> str:
     return dialogue_lines[-1] if dialogue_lines else "上一场的对话仍在耳边回响。"
 
 
-def _extract_outline_anchor(outline: str, act_label: str) -> str:
+def _extract_outline_anchor(outline: str, act_label: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> str:
     text = _normalize_script(outline)
     if not text:
         return ""
 
-    section_map = {
-        "第一幕": ["第一幕"],
-        "第二幕": ["第二幕"],
-        "第三幕": ["第三幕"],
-        "结局": ["结局", "结尾", "余韵", "高潮"],
-    }
-
-    keywords = section_map.get(act_label, [])
+    keywords = [act_label] if act_label in get_act_sequence(script_format) else []
     lines = [line.strip() for line in text.split("\n") if line.strip()]
 
     for idx, line in enumerate(lines):
         if any(key in line for key in keywords):
             anchor_lines = [line]
             for tail in lines[idx + 1 : idx + 4]:
-                if any(mark in tail for mark in ["第一幕", "第二幕", "第三幕", "结局", "高潮"]):
+                if any(mark in tail for mark in get_act_sequence(script_format)):
                     break
                 anchor_lines.append(tail)
             return "；".join(anchor_lines)
@@ -655,15 +751,80 @@ def _extract_outline_focus_points(outline: str, limit: int = 6) -> list[str]:
 
 
 def _extract_focus_keywords(text: str, limit: int = 10) -> list[str]:
+    cleaned = _normalize_script(text)
+    if not cleaned:
+        return []
+
     hits: list[str] = []
-    for token in re.findall(r"[\u4e00-\u9fff]{2,6}", text or ""):
-        if token in OUTLINE_STOPWORDS:
+    for group in extract_story_anchor_groups(cleaned):
+        primary = str(group.get("primary") or "").strip()
+        if primary and primary not in OUTLINE_STOPWORDS and primary not in hits:
+            hits.append(primary)
+        for term in group.get("terms", [])[:2]:
+            if term and term not in OUTLINE_STOPWORDS and term not in hits:
+                hits.append(term)
+        if len(hits) >= limit:
+            return hits[:limit]
+
+    focus_terms = sorted(
+        set(
+            ROLE_SUFFIXES
+            + SETTING_SUFFIXES
+            + RELATION_TERMS
+            + CLUE_TERMS
+            + MISSION_VERBS
+            + [
+                "海港城市",
+                "深海实验站",
+                "海洋实验站",
+                "事故真相",
+                "安保主管",
+                "失踪",
+                "潜入",
+                "封锁",
+                "调查",
+            ]
+        ),
+        key=len,
+        reverse=True,
+    )
+    focus_terms = [term for term in focus_terms if len(term) >= 2]
+    focus_pattern = "|".join(re.escape(term) for term in focus_terms)
+
+    for match in re.finditer(rf"(?:女|男|失踪|封闭|深海|海洋|近未来)?[\u4e00-\u9fff]{{0,4}}(?:{focus_pattern})", cleaned):
+        candidate = match.group(0).strip()
+        if candidate in OUTLINE_STOPWORDS or len(candidate) < 2:
             continue
-        if token not in hits:
-            hits.append(token)
+        if candidate not in hits:
+            hits.append(candidate)
+        matched_cores = [term for term in focus_terms if term in candidate and term != candidate]
+        for term in matched_cores[:2]:
+            if term not in hits:
+                hits.append(term)
+        if len(hits) >= limit:
+            return hits[:limit]
+
+    for verb in MISSION_VERBS:
+        for match in re.finditer(rf"{verb}[\u4e00-\u9fff]{{1,8}}", cleaned):
+            candidate = match.group(0).strip()
+            if len(candidate) < 2 or candidate in hits:
+                continue
+            hits.append(candidate)
+            if len(hits) >= limit:
+                return hits[:limit]
+
+    for chunk in re.split(r"[，。！？；：、\s]+", cleaned):
+        candidate = chunk.strip()
+        if not candidate or candidate in OUTLINE_STOPWORDS:
+            continue
+        if len(candidate) > 8:
+            candidate = candidate[:8]
+        if len(candidate) >= 2 and candidate not in hits:
+            hits.append(candidate)
         if len(hits) >= limit:
             break
-    return hits
+
+    return hits[:limit]
 
 
 def _parse_json_object(raw_text: str) -> Optional[dict[str, Any]]:
@@ -683,315 +844,6 @@ def _parse_json_object(raw_text: str) -> Optional[dict[str, Any]]:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
-    cleaned = _normalize_script(content)
-    outline_progress = _extract_outline_progress(outline, cleaned)
-    outline_points = outline_progress.get("items", [])
-    scene_count = _extract_scene_count(cleaned)
-    tail = cleaned[-1800:]
-
-    matched_points = outline_progress.get("covered_points", [])
-    missing_points = outline_progress.get("pending_points", [])
-    outline_coverage = round(len(matched_points) / len(outline_points), 2) if outline_points else 0.0
-    repetition = _detect_recent_repetition(cleaned)
-
-    resolved_threads: list[str] = []
-    dangling_threads: list[str] = []
-    for keyword in FORESHADOW_KEYWORDS:
-        occurrences = len(re.findall(re.escape(keyword), cleaned))
-        if occurrences == 0:
-            continue
-        if keyword in tail:
-            resolved_threads.append(keyword)
-        elif occurrences == 1:
-            dangling_threads.append(keyword)
-
-    ending_reached = any(keyword in tail for keyword in ENDING_KEYWORDS)
-    minimum_scenes = 2 if not outline_points else 3
-    is_complete = (
-        scene_count >= minimum_scenes
-        and ending_reached
-        and (not outline_points or outline_coverage >= 0.85)
-        and not dangling_threads
-        and not repetition.get("repetition_detected")
-    )
-
-    if is_complete:
-        reason = "当前剧本已经覆盖大纲主体内容，并且结尾段落完成了收束。"
-    elif repetition.get("repetition_detected"):
-        reason = repetition.get("reason") or "最近几场出现了重复生成，当前不应继续机械续写。"
-    elif missing_points:
-        reason = f"仍有大纲内容未充分落地：{missing_points[0]}"
-    elif dangling_threads:
-        reason = f"仍有关键伏笔没有明显回收：{dangling_threads[0]}"
-    elif not ending_reached:
-        reason = "当前文本还没有进入明确的结尾收束段落。"
-    else:
-        reason = "当前剧本还在推进阶段，尚未达到自动完结条件。"
-
-    return {
-        "is_complete": is_complete,
-        "reason": reason,
-        "scene_count": scene_count,
-        "ending_reached": ending_reached,
-        "outline_coverage": outline_coverage,
-        "matched_points": matched_points[:6],
-        "missing_points": missing_points[:6],
-        "resolved_threads": resolved_threads[:6],
-        "dangling_threads": dangling_threads[:6],
-        "covered_count": len(matched_points),
-        "total_outline_items": len(outline_points),
-        "current_target": outline_progress.get("current_target", ""),
-        "next_target": outline_progress.get("next_target", ""),
-        "section_label": outline_progress.get("section_label", ""),
-        "repetition_detected": bool(repetition.get("repetition_detected")),
-        "repetition_reason": repetition.get("reason", ""),
-        "can_continue": not is_complete,
-        "source": "fallback",
-    }
-
-
-def _assess_completion_with_model(content: str, outline: str) -> Optional[dict[str, Any]]:
-    if not outline.strip() or len(content.strip()) < 600:
-        return None
-
-    prompt = f"""你是剧本完结检查器。请根据“剧情大纲”和“当前剧本正文”判断这部剧本是否已经完整讲完，并且主要伏笔是否已经回收。
-
-判断标准：
-1. 必须已经写到结尾，不是停在中段。
-2. 必须基本覆盖大纲要求，不能还有核心剧情点没写。
-3. 主要伏笔和关键线索不能明显悬空。
-4. 如果已经完整收束，则 is_complete 必须为 true；否则必须为 false。
-
-只输出严格 JSON，不要附加任何解释。格式如下：
-{{
-  "is_complete": true,
-  "reason": "一句中文说明",
-  "missing_points": ["如果没有就返回空数组"],
-  "resolved_threads": ["已回收的关键伏笔或线索"],
-  "ending_reached": true
-}}
-
-剧情大纲：
-{outline}
-
-当前剧本正文：
-{content[-5000:]}
-"""
-
-    raw, _ = generate_clean_content(prompt, max_tokens=500)
-    parsed = _parse_json_object(raw)
-    if not parsed:
-        return None
-
-    return {
-        "is_complete": bool(parsed.get("is_complete")),
-        "reason": str(parsed.get("reason") or "").strip(),
-        "missing_points": [str(item).strip() for item in (parsed.get("missing_points") or []) if str(item).strip()],
-        "resolved_threads": [str(item).strip() for item in (parsed.get("resolved_threads") or []) if str(item).strip()],
-        "ending_reached": bool(parsed.get("ending_reached")),
-    }
-
-
-def _evaluate_script_completion(content: str, outline: str) -> dict[str, Any]:
-    fallback = _build_completion_fallback(content, outline)
-
-    try:
-        assessment = _assess_completion_with_model(content, outline)
-    except Exception:
-        assessment = None
-
-    if not assessment:
-        return fallback
-
-    missing_points: list[str] = []
-    for item in assessment.get("missing_points", []) + fallback.get("missing_points", []):
-        if item and item not in missing_points:
-            missing_points.append(item)
-
-    resolved_threads: list[str] = []
-    for item in assessment.get("resolved_threads", []) + fallback.get("resolved_threads", []):
-        if item and item not in resolved_threads:
-            resolved_threads.append(item)
-
-    model_complete = bool(assessment.get("is_complete"))
-    outline_coverage = float(fallback.get("outline_coverage", 0) or 0)
-    fallback_complete = bool(
-        fallback.get("ending_reached")
-        and (outline_coverage >= 0.75 or not fallback.get("total_outline_items"))
-        and not fallback.get("repetition_detected")
-    )
-    blocking_missing = bool(missing_points and outline_coverage < 0.85)
-    blocking_dangling = bool(fallback.get("dangling_threads") and not fallback.get("ending_reached"))
-    is_complete = bool(fallback.get("is_complete")) or (
-        model_complete and fallback_complete and not blocking_missing and not blocking_dangling
-    )
-
-    return {
-        **fallback,
-        "is_complete": is_complete,
-        "reason": assessment.get("reason") or fallback.get("reason"),
-        "missing_points": missing_points[:6],
-        "resolved_threads": resolved_threads[:6],
-        "ending_reached": bool(assessment.get("ending_reached") or fallback.get("ending_reached")),
-        "can_continue": not is_complete,
-        "source": "model+fallback",
-    }
-
-
-def _build_next_beat_prompt(content: str, outline: str, characters: str) -> dict[str, Any]:
-    cleaned = _normalize_script(content)
-    current_scene = _extract_latest_scene(cleaned)
-    prop = _extract_recent_prop(cleaned)
-    beat_index = _extract_next_beat_index(cleaned)
-    act_context = _resolve_next_act_context(outline, cleaned, beat_index)
-    act_label = act_context["section_label"]
-    section_index = act_context["section_index"]
-    current_target = act_context["current_target"]
-    next_target = act_context["next_target"]
-    outline_progress = act_context["outline_progress"]
-    progression_hint = _build_progression_hint(beat_index)
-    last_dialogue_hint = _extract_last_dialogue_hint(cleaned)
-    recent_scene_digest = _build_recent_scene_digest(cleaned, limit=3)
-    covered_digest = _build_outline_digest(
-        outline_progress.get("covered_items", [])[-2:],
-        "暂无已完成节点摘要。",
-        limit=2,
-    )
-    pending_digest = _build_outline_digest(
-        outline_progress.get("pending_items", []),
-        "大纲主线已基本覆盖，下一场应完成结尾收束。",
-        limit=3,
-    )
-
-    prompt = f"""你是专业中文编剧，请基于“已有正文 + 剧情大纲 + 人物设定”续写“下一个节点（下一场）”。
-
-硬性要求：
-1. 必须严格承接已有正文，不能重写前文，不要重复已经出现的段落。
-2. 必须实质推进当前要写的大纲节点：{current_target or '延续当前剧情主线推进'}。
-3. 推进完当前节点后，可以顺手为下一节点埋桥：{next_target or '根据剧情自然衔接下一步'}。
-4. 只输出“新增这一场”的内容，不要输出解释。
-5. 开头必须依次输出：
-   - {act_label}·第{section_index}节
-   - 第{beat_index}场
-   - 一个新的、与当前剧情连续的中文场景标题（例如“内景 逃生舱 清晨”）
-6. 必须包含：承接上场、动作描述、人物对白。
-7. 人物对白只允许真实角色名，禁止把“承接上场/推进说明”等当成角色名。
-8. 不要机械沿用最近几场的相同场景标题、对白和情绪推进，尤其不要反复写同一个地点和同一时间标记。
-9. 如果大纲主线已经基本写完，这一场必须承担结尾收束功能，而不是继续拖延。
-
-最近几场（禁止复读）：
-{recent_scene_digest or '- 暂无最近场次摘要'}
-
-已经覆盖的大纲节点：
-{covered_digest}
-
-剩余待写的大纲节点：
-{pending_digest}
-
-人物设定：
-{characters or '沿用现有正文已出现的人物关系'}
-
-上一场关键信息：
-- 上一场场景：{current_scene}
-- 关键对白：{last_dialogue_hint}
-- 关键线索：{prop}
-- 节奏推进建议：{progression_hint}
-
-已有正文（供承接，不要重复）：
-{cleaned[-2200:]}
-"""
-
-    return {
-        "prompt": prompt,
-        "beat_index": beat_index,
-        "act_label": act_label,
-        "section_index": section_index,
-        "current_scene": current_scene,
-        "current_target": current_target,
-        "next_target": next_target,
-        "outline_progress": outline_progress,
-    }
-
-
-def _build_next_beat_text(content: str, outline: str = "", characters: str = "") -> str:
-    prompt_payload = _build_next_beat_prompt(content, outline, characters)
-    prompt = prompt_payload["prompt"]
-    beat_index = prompt_payload["beat_index"]
-    act_label = prompt_payload["act_label"]
-    section_index = prompt_payload["section_index"]
-    current_scene = prompt_payload["current_scene"]
-    current_target = prompt_payload["current_target"]
-    next_target = prompt_payload["next_target"]
-    outline_progress = prompt_payload["outline_progress"]
-    protagonist = _extract_primary_character(content)
-    fallback_heading = _infer_next_scene_title(current_scene, beat_index)
-
-    last_failure_reason = ""
-    last_candidate = ""
-
-    for attempt in range(3):
-        attempt_prompt = (
-            prompt
-            if attempt == 0
-            else _build_retry_prompt(prompt, last_failure_reason or "上一版没有通过校验", current_target, next_target)
-        )
-
-        try:
-            generated, _ = generate_clean_content(attempt_prompt, max_tokens=1800)
-            generated = enforce_script_labels(generated)
-            normalized = _normalize_script(generated)
-        except Exception:
-            normalized = ""
-
-        if not normalized:
-            last_failure_reason = "模型没有返回可用的新场次内容"
-            continue
-
-        if f"第{beat_index}场" not in normalized or not re.search(r"^(内景|外景)", normalized, flags=re.MULTILINE):
-            normalized = _normalize_script(
-                f"""{act_label}·第{section_index}节
-第{beat_index}场
-{fallback_heading}
-
-承接上场
-上一场位于：{current_scene}
-当前目标：{current_target or '延续当前剧情主线推进'}
-
-{normalized}
-"""
-            )
-
-        validation = _validate_generated_beat(normalized, content, outline_progress)
-        if validation.get("ok"):
-            return normalized
-
-        last_candidate = normalized
-        last_failure_reason = validation.get("reason") or "新场次校验未通过"
-
-    fallback_target = current_target or "推动剧情进入新的阶段，并形成明确的新后果。"
-    bridge_target = next_target or "为后续场次留下新的行动方向。"
-    fallback_reason = last_failure_reason or "模型续写未能稳定推进当前节点"
-
-    return _normalize_script(
-        f"""{act_label}·第{section_index}节
-第{beat_index}场
-{fallback_heading}
-
-承接上场
-上一场位于：{current_scene}
-当前目标：{fallback_target}
-校验备注：{fallback_reason}
-
-动作描述
-{protagonist}没有停留在上一场的情绪里，而是立刻针对“{fallback_target}”展开行动。新的信息被揭开，局势因此发生不可逆的变化，同时也为“{bridge_target}”埋下了更具体的后果。
-
-{protagonist}
-这一次，我们不能再原地打转了。
-"""
-    )
-
-
 def _looks_like_outline_meta(line: str) -> bool:
     stripped = (line or "").strip()
     if not stripped:
@@ -1004,7 +856,7 @@ def _looks_like_outline_meta(line: str) -> bool:
     )
 
 
-def _split_outline_segments(line: str) -> list[str]:
+def _split_outline_segments(line: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> list[str]:
     raw = _normalize_script(line)
     if not raw:
         return []
@@ -1014,27 +866,14 @@ def _split_outline_segments(line: str) -> list[str]:
         for part in re.split(r"[。！？；]+", raw)
         if part.strip(" ，,；;：:")
     ]
-    segments: list[str] = []
-
-    for part in primary_parts or [raw]:
-        comma_parts = [
-            chunk.strip(" ，,；;：:")
-            for chunk in re.split(r"[，,]", part)
-            if chunk.strip(" ，,；;：:")
-        ]
-        if len(comma_parts) >= 2 and len(_normalize_match_text(part)) >= 18:
-            long_chunks = [chunk for chunk in comma_parts if len(_normalize_match_text(chunk)) >= 6]
-            if len(long_chunks) >= 2:
-                segments.extend(long_chunks)
-                continue
-        segments.append(part)
+    segments: list[str] = list(primary_parts or [raw])
 
     cleaned_segments: list[str] = []
     seen: set[str] = set()
     for segment in segments:
         segment = re.sub(r"^(这一幕|本幕|随后|接着|然后|最终|最后)[：:\s]*", "", segment)
         segment = segment.strip(" ，,；;：:")
-        if not segment or _looks_like_outline_heading(segment) or _looks_like_outline_meta(segment):
+        if not segment or _looks_like_outline_heading(segment, script_format) or _looks_like_outline_meta(segment):
             continue
 
         normalized = _normalize_match_text(segment)
@@ -1052,7 +891,7 @@ def _split_outline_segments(line: str) -> list[str]:
     return [raw] if len(_normalize_match_text(raw)) >= 6 else []
 
 
-def _extract_outline_items(outline: str) -> list[dict[str, Any]]:
+def _extract_outline_items(outline: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> list[dict[str, Any]]:
     text = _normalize_script(outline)
     if not text:
         return []
@@ -1066,17 +905,17 @@ def _extract_outline_items(outline: str) -> list[dict[str, Any]]:
         if not line:
             continue
 
-        section_label = _detect_outline_section_label(line)
+        section_label = _detect_outline_section_label(line, script_format)
         if section_label:
             current_section = section_label
             line = _strip_outline_section_heading(line, section_label)
             if not line:
                 continue
 
-        if _looks_like_outline_heading(line):
+        if _looks_like_outline_heading(line, script_format):
             continue
 
-        for segment in _split_outline_segments(line):
+        for segment in _split_outline_segments(line, script_format):
             keywords = _extract_focus_keywords(segment, limit=6)
             if len(keywords) < 2 and len(segment) < 12:
                 continue
@@ -1088,10 +927,49 @@ def _extract_outline_items(outline: str) -> list[dict[str, Any]]:
             seen.add(key)
             items.append({"section": current_section or "剧情推进", "text": segment})
 
-    return items
+    return _merge_outline_items_by_section(items)
 
 
-def _extract_text_chunks(text: str) -> list[str]:
+def _merge_outline_items_by_section(
+    items: list[dict[str, Any]],
+    *,
+    max_items_per_section: int = 3,
+) -> list[dict[str, Any]]:
+    if not items:
+        return []
+
+    merged: list[dict[str, Any]] = []
+    cursor = 0
+    safe_max = max(1, int(max_items_per_section or 3))
+
+    while cursor < len(items):
+        section = items[cursor].get("section") or "剧情推进"
+        section_items: list[str] = []
+        while cursor < len(items) and (items[cursor].get("section") or "剧情推进") == section:
+            text = str(items[cursor].get("text") or "").strip()
+            if text:
+                section_items.append(text)
+            cursor += 1
+
+        if len(section_items) <= safe_max:
+            merged.extend({"section": section, "text": text} for text in section_items)
+            continue
+
+        bucket_count = min(safe_max, len(section_items))
+        base_size, extra = divmod(len(section_items), bucket_count)
+        offset = 0
+
+        for bucket_index in range(bucket_count):
+            size = base_size + (1 if bucket_index < extra else 0)
+            chunk = section_items[offset : offset + size]
+            offset += size
+            if chunk:
+                merged.append({"section": section, "text": "；".join(chunk)})
+
+    return merged
+
+
+def _extract_text_chunks(text: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> list[str]:
     cleaned = _normalize_script(text)
     if not cleaned:
         return []
@@ -1099,7 +977,7 @@ def _extract_text_chunks(text: str) -> list[str]:
     chunks: list[str] = []
     for line in cleaned.split("\n"):
         stripped = line.strip()
-        if not stripped or _looks_like_outline_heading(stripped):
+        if not stripped or _looks_like_outline_heading(stripped, script_format):
             continue
 
         pieces = [
@@ -1114,13 +992,13 @@ def _extract_text_chunks(text: str) -> list[str]:
     return chunks or [cleaned]
 
 
-def _best_chunk_similarity(reference: str, text: str) -> float:
+def _best_chunk_similarity(reference: str, text: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> float:
     reference_norm = _normalize_match_text(reference)
     if not reference_norm:
         return 0.0
 
     best = 0.0
-    for chunk in _extract_text_chunks(text):
+    for chunk in _extract_text_chunks(text, script_format):
         chunk_norm = _normalize_match_text(chunk)
         if not chunk_norm:
             continue
@@ -1130,10 +1008,14 @@ def _best_chunk_similarity(reference: str, text: str) -> float:
     return best
 
 
-def _estimate_outline_item_coverage(item_text: str, content: str) -> dict[str, Any]:
-    keywords, matched, keyword_coverage = _extract_keyword_matches(item_text, content)
-    similarity = _best_chunk_similarity(item_text, content)
-    normalized_item = _normalize_match_text(item_text)
+def _estimate_segment_match(
+    reference: str,
+    content: str,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    keywords, matched, keyword_coverage = _extract_keyword_matches(reference, content)
+    similarity = _best_chunk_similarity(reference, content, script_format)
+    normalized_item = _normalize_match_text(reference)
     normalized_content = _normalize_match_text(content)
     exact_match = bool(normalized_item and len(normalized_item) >= 10 and normalized_item in normalized_content)
 
@@ -1152,17 +1034,44 @@ def _estimate_outline_item_coverage(item_text: str, content: str) -> dict[str, A
     }
 
 
-def _is_outline_item_covered(item_text: str, content: str) -> bool:
-    return _estimate_outline_item_coverage(item_text, content).get("covered", False)
+def _estimate_outline_item_coverage(
+    item_text: str,
+    content: str,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    segment_info = _estimate_segment_match(item_text, content, script_format)
+    clauses = [part.strip() for part in re.split(r"[；;]", item_text or "") if part.strip()]
+    clause_matches = []
+    if len(clauses) >= 2:
+        clause_matches = [_estimate_segment_match(clause, content, script_format) for clause in clauses]
+
+    clause_covered_count = sum(1 for item in clause_matches if item.get("covered"))
+    clause_required_count = max(2, math.ceil(len(clauses) * 0.6)) if len(clauses) >= 2 else 0
+    clause_group_covered = bool(clause_matches) and clause_covered_count >= clause_required_count
+
+    return {
+        **segment_info,
+        "covered": bool(segment_info.get("covered") or clause_group_covered),
+        "clause_count": len(clauses),
+        "clause_covered_count": clause_covered_count,
+    }
 
 
-def _extract_outline_progress(outline: str, content: str) -> dict[str, Any]:
-    items = _extract_outline_items(outline)
+def _is_outline_item_covered(item_text: str, content: str, script_format: str = DEFAULT_SCRIPT_FORMAT) -> bool:
+    return _estimate_outline_item_coverage(item_text, content, script_format).get("covered", False)
+
+
+def _extract_outline_progress(
+    outline: str,
+    content: str,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    items = _extract_outline_items(outline, script_format)
     covered_items: list[dict[str, Any]] = []
     pending_items: list[dict[str, Any]] = []
 
     for item in items:
-        coverage_info = _estimate_outline_item_coverage(item["text"], content)
+        coverage_info = _estimate_outline_item_coverage(item["text"], content, script_format)
         enriched = {
             **item,
             "keywords": coverage_info["keywords"],
@@ -1179,10 +1088,10 @@ def _extract_outline_progress(outline: str, content: str) -> dict[str, Any]:
     section_label = ""
     section_index = 1
     if pending_items:
-        section_label = pending_items[0]["section"]
+        section_label = _normalize_act_label(pending_items[0]["section"])
         section_index = len([item for item in covered_items if item["section"] == section_label]) + 1
     elif covered_items:
-        section_label = covered_items[-1]["section"]
+        section_label = _normalize_act_label(covered_items[-1]["section"])
         section_index = len([item for item in covered_items if item["section"] == section_label])
 
     return {
@@ -1199,12 +1108,17 @@ def _extract_outline_progress(outline: str, content: str) -> dict[str, Any]:
     }
 
 
-def _is_soft_closure_pending(item: dict[str, Any]) -> bool:
-    section = str(item.get("section") or "")
+def _is_soft_closure_pending(
+    item: dict[str, Any],
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> bool:
+    section = _normalize_act_label(str(item.get("section") or ""))
     coverage = float(item.get("coverage") or 0.0)
     similarity = float(item.get("similarity") or 0.0)
     matched_keywords = item.get("matched_keywords") or []
-    return section == "结局" and (coverage >= 0.45 or similarity >= 0.68 or len(matched_keywords) >= 2)
+    return section == get_last_act_label(script_format) and (
+        coverage >= 0.45 or similarity >= 0.68 or len(matched_keywords) >= 2
+    )
 
 
 def _closure_item_is_resolved(item: dict[str, Any]) -> bool:
@@ -1214,63 +1128,789 @@ def _closure_item_is_resolved(item: dict[str, Any]) -> bool:
     return coverage >= 0.6 or similarity >= 0.74 or len(matched_keywords) >= 3
 
 
+def _build_act_progress_state(
+    outline_progress: dict[str, Any],
+    content: str,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    outline_items = outline_progress.get("items", [])
+    covered_items = outline_progress.get("covered_items", [])
+    pending_items = outline_progress.get("pending_items", [])
+    written_act_labels = _extract_written_act_labels(content, script_format)
+    act_sequence = get_act_sequence(script_format)
+
+    completed_act_labels: list[str] = []
+    for label in act_sequence:
+        scoped_items = [item for item in outline_items if _normalize_act_label(item.get("section") or "") == label]
+        if scoped_items and not any(_normalize_act_label(item.get("section") or "") == label for item in pending_items):
+            completed_act_labels.append(label)
+
+    current_act_label = written_act_labels[-1] if written_act_labels else ""
+    if not current_act_label and covered_items:
+        current_act_label = _normalize_act_label(covered_items[-1].get("section") or "")
+
+    next_act_label = ""
+    if current_act_label:
+        next_act_label = _next_act_label_after(current_act_label, script_format)
+    else:
+        pending_labels = _ordered_unique_labels([item.get("section", "") for item in pending_items])
+        next_act_label = pending_labels[0] if pending_labels else ""
+
+    return {
+        "written_act_labels": written_act_labels,
+        "completed_act_labels": completed_act_labels,
+        "current_act_label": current_act_label,
+        "next_act_label": next_act_label,
+    }
+
+
+def _extract_first_scene_index(text: str) -> int:
+    arabic_hits = [int(item) for item in re.findall(r"第\s*(\d+)\s*场", text)]
+    if arabic_hits:
+        return min(arabic_hits)
+
+    chinese_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    chinese_hits = []
+    for item in re.findall(r"第\s*([一二三四五六七八九十])\s*场", text):
+        if item in chinese_map:
+            chinese_hits.append(chinese_map[item])
+
+    if chinese_hits:
+        return min(chinese_hits)
+
+    return 1
+
+
+def _build_issue_excerpt(text: str, limit: int = 120) -> str:
+    cleaned = re.sub(r"\s+", " ", _normalize_script(text))
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}..."
+
+
+def _extract_current_act_context(
+    content: str,
+    outline: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    cleaned = _strip_internal_scaffolding(content)
+    outline_progress = _extract_outline_progress(outline, cleaned, script_format=script_format)
+    act_progress = _build_act_progress_state(outline_progress, cleaned, script_format=script_format)
+    current_act_label = (
+        act_progress.get("current_act_label")
+        or outline_progress.get("section_label")
+        or get_act_sequence(script_format)[0]
+    )
+    current_act_text = cleaned
+    previous_content = ""
+
+    header_matches = list(
+        re.finditer(
+            rf"^{build_act_label_pattern(script_format)}·第[一二三四五六七八九十百零\d]+节\s*$",
+            cleaned,
+            flags=re.MULTILINE,
+        )
+    )
+    if header_matches:
+        labels = [_normalize_act_label(match.group(1)) for match in header_matches]
+        current_act_label = labels[-1] or current_act_label
+        start_index = len(header_matches) - 1
+        while start_index > 0 and labels[start_index - 1] == current_act_label:
+            start_index -= 1
+        act_start = header_matches[start_index].start()
+        previous_content = cleaned[:act_start].strip()
+        current_act_text = cleaned[act_start:].strip()
+
+    act_outline_items: list[dict[str, Any]] = []
+    covered_act_items: list[dict[str, Any]] = []
+    pending_act_items: list[dict[str, Any]] = []
+    for item in outline_progress.get("items", []):
+        if _normalize_act_label(item.get("section") or "") != current_act_label:
+            continue
+        coverage_info = _estimate_outline_item_coverage(item["text"], current_act_text, script_format)
+        enriched = {
+            **item,
+            "keywords": coverage_info["keywords"],
+            "matched_keywords": coverage_info["matched_keywords"],
+            "coverage": coverage_info["coverage"],
+            "similarity": coverage_info["similarity"],
+            "exact_match": coverage_info["exact_match"],
+        }
+        act_outline_items.append(enriched)
+        if coverage_info["covered"]:
+            covered_act_items.append(enriched)
+        else:
+            pending_act_items.append(enriched)
+
+    next_act_label = act_progress.get("next_act_label") or _next_act_label_after(current_act_label, script_format)
+    if next_act_label == current_act_label:
+        next_act_label = _next_act_label_after(current_act_label, script_format)
+
+    return {
+        "full_content": cleaned,
+        "previous_content": previous_content,
+        "script_format": script_format,
+        "act_label": current_act_label,
+        "act_text": current_act_text,
+        "outline_progress": outline_progress,
+        "act_outline_items": act_outline_items,
+        "covered_act_items": covered_act_items,
+        "pending_act_items": pending_act_items,
+        "next_act_label": next_act_label,
+    }
+
+
+def _build_missing_outline_review(context: dict[str, Any]) -> dict[str, Any]:
+    act_label = context.get("act_label") or "当前幕"
+    act_outline_items = context.get("act_outline_items") or []
+    pending_act_items = context.get("pending_act_items") or []
+
+    if not act_outline_items:
+        return {
+            "has_issue": False,
+            "summary": f"{act_label}当前没有提取到可比对的大纲节点，这一项暂时无法精确判断。",
+            "items": [],
+        }
+
+    if not pending_act_items:
+        return {
+            "has_issue": False,
+            "summary": f"{act_label}在“是否完整覆盖本幕大纲”这一项上没有明显问题。",
+            "items": [],
+        }
+
+    items = [
+        {
+            "text": item.get("text", ""),
+            "coverage": round(float(item.get("coverage") or 0.0), 2),
+            "similarity": round(float(item.get("similarity") or 0.0), 2),
+            "matched_keywords": item.get("matched_keywords") or [],
+        }
+        for item in pending_act_items[:4]
+    ]
+    first_missing = items[0]["text"] if items else act_label
+    return {
+        "has_issue": True,
+        "summary": f"{act_label}还没有完整覆盖本幕大纲，当前至少还缺少这些内容，最先缺的是：{first_missing}",
+        "items": items,
+    }
+
+
+def _build_off_outline_review_fallback(
+    context: dict[str, Any],
+    *,
+    outline: str = "",
+    idea: str = "",
+    characters: str = "",
+) -> dict[str, Any]:
+    act_text = context.get("act_text", "")
+    previous_content = context.get("previous_content", "")
+    script_format = context.get("script_format") or DEFAULT_SCRIPT_FORMAT
+    issues: list[dict[str, Any]] = []
+
+    def append_issue(problem: str, reason: str, snippet: str = "") -> None:
+        if not problem:
+            return
+        if any(problem == item.get("problem") for item in issues):
+            return
+        issues.append(
+            {
+                "problem": problem,
+                "reason": reason,
+                "snippet": snippet or _build_issue_excerpt(act_text),
+            }
+        )
+
+    if previous_content:
+        repetition = _detect_recent_repetition(previous_content, act_text)
+        if repetition.get("repetition_detected"):
+            append_issue(
+                "当前幕重复回写了前文已经发生过的内容",
+                repetition.get("reason") or "这一幕与前文最近几场相似度过高，推进不够新。",
+            )
+
+        previous_progress = _extract_outline_progress(outline, previous_content, script_format)
+        backtracking = _detect_outline_backtracking(act_text, previous_progress, script_format)
+        if backtracking.get("backtracking"):
+            append_issue(
+                "当前幕回退到了已经完成的大纲节点",
+                backtracking.get("reason") or "这一幕又把前面已经写完的节点重新当成核心事件。",
+            )
+
+    if issues:
+        return {
+            "has_issue": True,
+            "summary": f"{context.get('act_label') or '当前幕'}存在偏离当前幕目标的内容，最先要处理的是：{issues[0]['problem']}",
+            "items": issues[:4],
+        }
+
+    return {
+        "has_issue": False,
+        "summary": "这一方面没有明显问题，当前幕总体仍围绕本幕大纲推进。",
+        "items": [],
+    }
+
+
+def _extract_json_payload(text: str) -> dict[str, Any]:
+    match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
+    if not match:
+        raise ValueError("模型没有返回可解析的 JSON 对象")
+    return json.loads(match.group(0))
+
+
+def _analyze_current_act_with_model(
+    context: dict[str, Any],
+    missing_review: dict[str, Any],
+    off_outline_fallback: dict[str, Any],
+    *,
+    idea: str = "",
+    characters: str = "",
+) -> dict[str, Any]:
+    outline_digest = _build_outline_digest(
+        context.get("act_outline_items") or [],
+        "当前没有提取到可用的大纲节点。",
+        limit=4,
+    )
+    missing_digest = "\n".join(
+        f"- {item.get('text', '')}" for item in (missing_review.get("items") or [])
+    ) or "- 当前未检测到缺失节点"
+    previous_digest = _build_recent_scene_digest(context.get("previous_content") or "", limit=2) or "- 无前文场次"
+    candidate_digest = "\n".join(
+        f"- {item.get('problem', '')}：{item.get('reason', '')}"
+        for item in (off_outline_fallback.get("items") or [])
+    ) or "- 当前没有明确的脱纲候选问题"
+
+    prompt = f"""你是中文剧本审校助手。只分析“当前这一幕”和本幕大纲是否对齐，不要润色，不要重写，不要给用词建议。
+
+当前幕：{context.get("act_label") or "当前幕"}
+本幕应完成的大纲节点：
+{outline_digest}
+
+系统已确认仍未完整覆盖的节点：
+{missing_digest}
+
+前文最近场次（仅供判断是否重复或回退）：
+{previous_digest}
+
+人物设定（仅供判断是否突然脱离核心人物）：
+{characters or "未提供"}
+
+最早核心设定（仅供判断是否偏离题设）：
+{_normalize_script(idea)[:600] or "未提供"}
+
+当前这一幕正文：
+{context.get("act_text") or ""}
+
+系统初筛到的可能脱纲信号：
+{candidate_digest}
+
+请只返回 JSON：
+{{
+  "off_outline_summary": "一句话说明这一方面有没有问题",
+  "off_outline_items": [
+    {{
+      "problem": "具体问题",
+      "snippet": "对应的原文片段，最多 60 字",
+      "reason": "为什么它偏离当前幕大纲"
+    }}
+  ],
+  "summary": "对当前幕整体问题的简短总结"
+}}
+
+规则：
+1. 只讨论当前这一幕，不要提其他幕。
+2. 如果“脱离大纲”这一方面没有明显问题，off_outline_items 返回 []，off_outline_summary 必须明确写“这一方面没有明显问题”。
+3. 只保留明显问题，最多 3 条，不要凑数。
+4. 不要输出 JSON 之外的任何文字。"""
+
+    raw, _ = generate_clean_content(prompt, max_tokens=1600)
+    return _extract_json_payload(raw)
+
+
+def _build_current_act_review(
+    content: str,
+    *,
+    outline: str = "",
+    idea: str = "",
+    characters: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    context = _extract_current_act_context(content, outline, script_format=script_format)
+    act_label = context.get("act_label") or "当前幕"
+    act_text = context.get("act_text") or ""
+
+    if not act_text:
+        empty_summary = "当前还没有可分析的幕次正文。"
+        return {
+            "act_label": act_label,
+            "current_act_text": "",
+            "has_issues": False,
+            "missing_outline": {"has_issue": False, "summary": empty_summary, "items": []},
+            "off_outline": {"has_issue": False, "summary": empty_summary, "items": []},
+            "summary": empty_summary,
+            "next_step": "请先生成当前幕正文，再进行问题分析。",
+        }
+
+    missing_review = _build_missing_outline_review(context)
+    off_outline_review = _build_off_outline_review_fallback(
+        context,
+        outline=outline,
+        idea=idea,
+        characters=characters,
+    )
+    overall_summary = ""
+
+    try:
+        model_review = _analyze_current_act_with_model(
+            context,
+            missing_review,
+            off_outline_review,
+            idea=idea,
+            characters=characters,
+        )
+        model_items: list[dict[str, Any]] = []
+        for item in model_review.get("off_outline_items", []) or []:
+            problem = str(item.get("problem") or "").strip()
+            if not problem:
+                continue
+            model_items.append(
+                {
+                    "problem": problem,
+                    "snippet": str(item.get("snippet") or "").strip() or _build_issue_excerpt(act_text),
+                    "reason": str(item.get("reason") or "").strip() or "这一段偏离了当前幕应完成的大纲目标。",
+                }
+            )
+
+        combined_items = model_items[:]
+        for item in off_outline_review.get("items", []) or []:
+            if any(existing.get("problem") == item.get("problem") for existing in combined_items):
+                continue
+            combined_items.append(item)
+
+        if combined_items:
+            off_outline_review = {
+                "has_issue": True,
+                "summary": str(model_review.get("off_outline_summary") or off_outline_review.get("summary") or "").strip()
+                or f"{act_label}存在偏离当前幕目标的内容，最先要处理的是：{combined_items[0].get('problem', '偏离当前幕目标')}",
+                "items": combined_items[:4],
+            }
+        else:
+            off_outline_review = {
+                "has_issue": False,
+                "summary": str(model_review.get("off_outline_summary") or "").strip()
+                or "这一方面没有明显问题，当前幕总体仍围绕本幕大纲推进。",
+                "items": [],
+            }
+
+        overall_summary = str(model_review.get("summary") or "").strip()
+    except Exception:
+        overall_summary = ""
+
+    has_issues = bool(missing_review.get("has_issue") or off_outline_review.get("has_issue"))
+    if not overall_summary:
+        if missing_review.get("has_issue") and off_outline_review.get("has_issue"):
+            overall_summary = f"{act_label}现在同时有两类问题：一是本幕大纲还没写完整，二是当前幕里有偏离本幕目标的内容。"
+        elif missing_review.get("has_issue"):
+            overall_summary = f"{act_label}当前主要问题是本幕大纲还没写完整；脱离大纲这一方面暂未发现明显问题。"
+        elif off_outline_review.get("has_issue"):
+            overall_summary = f"{act_label}当前主要问题是存在偏离本幕目标的内容；大纲覆盖这一方面基本没问题。"
+        else:
+            overall_summary = f"{act_label}当前这一幕基本符合本幕大纲，两方面暂未发现明显问题。"
+
+    next_step = (
+        "可继续点击“一键生成修改版本”，系统会只重写当前这一幕，并保留其他幕不动。"
+        if has_issues
+        else "当前幕暂时不需要 AI 修改版本。"
+    )
+
+    return {
+        "act_label": act_label,
+        "current_act_text": act_text,
+        "has_issues": has_issues,
+        "missing_outline": missing_review,
+        "off_outline": off_outline_review,
+        "summary": overall_summary,
+        "next_step": next_step,
+    }
+
+
+def _build_missing_issue_lines(
+    items: list[dict[str, Any]] | list[str],
+    empty_text: str = "- 这一方面没有明显问题，保持当前有效推进。",
+) -> str:
+    lines: list[str] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            lines.append(f"- {text}")
+    return "\n".join(lines) or empty_text
+
+
+def _build_off_outline_issue_lines(
+    items: list[dict[str, Any]] | list[str],
+    empty_text: str = "- 这一方面没有明显问题，保持当前有效桥段即可。",
+) -> str:
+    lines: list[str] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            problem = str(item.get("problem") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+        else:
+            problem = str(item or "").strip()
+            snippet = ""
+            reason = ""
+
+        if not any((problem, snippet, reason)):
+            continue
+
+        detail_parts: list[str] = []
+        if snippet:
+            detail_parts.append(f"要改写或删除的原文片段：{snippet}")
+        if reason:
+            detail_parts.append(f"问题原因：{reason}")
+
+        if problem:
+            line = f"- {problem}"
+            if detail_parts:
+                line = f"{line}；{'；'.join(detail_parts)}"
+        else:
+            line = f"- {'；'.join(detail_parts)}"
+        lines.append(line)
+
+    return "\n".join(lines) or empty_text
+
+
+def _build_current_act_revision_prompt(
+    context: dict[str, Any],
+    analysis: dict[str, Any],
+    *,
+    characters: str = "",
+    idea: str = "",
+) -> str:
+    act_label = context.get("act_label") or "当前幕"
+    next_act_label = context.get("next_act_label") or "下一幕"
+    format_label = get_script_format_label(context.get("script_format") or DEFAULT_SCRIPT_FORMAT)
+    outline_digest = _build_outline_digest(
+        context.get("act_outline_items") or [],
+        "当前没有提取到可用的大纲节点。",
+        limit=4,
+    )
+    covered_digest = _build_outline_digest(
+        context.get("covered_act_items") or [],
+        "当前幕还没有稳定落地的节点，可在修订时重新组织。",
+        limit=3,
+    )
+    missing_lines = _build_missing_issue_lines(analysis.get("missing_outline", {}).get("items") or [])
+    off_outline_lines = _build_off_outline_issue_lines(analysis.get("off_outline", {}).get("items") or [])
+    previous_tail = (context.get("previous_content") or "")[-1800:] or "这是开场，没有更早前文。"
+
+    return f"""你是专业中文编剧，请只重写当前这一幕，让它更完整、更贴合当前幕大纲。当前剧本形式题材是“{format_label}”。下面列出的内容是已经由 AI 审查确认的问题清单，修订稿必须逐条解决。不要解释，不要总结，只输出修订后的当前幕正文。
+
+当前幕：{act_label}
+下一幕：{next_act_label}
+本幕全部目标节点：
+{outline_digest}
+
+当前这一幕已经比较有效的节点：
+{covered_digest}
+
+AI 已确认的问题 1：当前幕还没完整覆盖大纲
+{missing_lines}
+
+AI 已确认的问题 2：当前幕中偏离大纲的内容
+{off_outline_lines}
+
+人物设定（只供承接，不要改人物身份）：
+{characters or "沿用已有正文中的人物关系"}
+
+最早核心设定（只供守住题设，不要扩写说明）：
+{_normalize_script(idea)[:800] or "未提供"}
+
+修订要求：
+1. 只改当前这一幕，不要改前文，也不要补写{next_act_label}。
+2. 先在内部完成两件事：补齐缺失节点；改写或删除偏离点，然后再整合成一版完整当前幕。
+3. 保留当前幕里已经有效的场景、动作和对白，但凡被问题清单点名的片段，必须修掉，不能原样保留。
+4. 必须补完缺失节点；如果某一类问题本来就没有，就保持那一方面继续正确。
+5. 这份修订稿必须严格依据上面的“问题 1 / 问题 2”逐条修改，所以缺失节点必须能从正文里直接读到；缺失节点里的关键动作、关系和结果不要只做泛化改写。
+6. 偏离点对应的片段和问题不能继续留在新版本里，必要时直接删掉并换成服务本幕目标的新内容。
+7. 只输出可拍摄的剧本正文，不要写“修改说明”“问题分析”“优化后”等说明文字。
+8. 保持中文幕节标题、场次编号、内景/外景标题格式自然清晰。
+9. 严禁输出内部脚手架提示词，如“上一场位于”“当前目标”“校验备注”等。
+10. 尽量把总字数控制在 3500 左右，但如果当前幕要写完整，优先保证内容完整，不要因为担心超字数就中途截断。
+11. 这是一次必须正面解决问题的修订，不允许漏改，不允许绕开，不允许只做表面润色。
+12. 如果问题清单里提到“缺了什么”就必须补上；如果提到“哪段有问题”就必须直接改掉那一段，不能假装处理。
+
+前文末尾（仅供承接，不要重写）：
+{previous_tail}
+
+当前这一幕原文：
+{context.get("act_text") or ""}"""
+
+
+def _revise_current_act(
+    content: str,
+    *,
+    outline: str = "",
+    characters: str = "",
+    idea: str = "",
+    analysis: Optional[dict[str, Any]] = None,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    context = _extract_current_act_context(content, outline, script_format=script_format)
+    act_text = context.get("act_text") or ""
+    if not act_text:
+        raise ValueError("当前还没有可修订的幕次正文")
+
+    review = analysis if isinstance(analysis, dict) else None
+    if not review or review.get("act_label") != context.get("act_label"):
+        review = _build_current_act_review(
+            content,
+            outline=outline,
+            idea=idea,
+            characters=characters,
+            script_format=script_format,
+        )
+
+    if not review.get("has_issues"):
+        cleaned_content = context.get("full_content") or _strip_internal_scaffolding(content)
+        return {
+            "act_label": context.get("act_label") or "当前幕",
+            "analysis": review,
+            "revised_act": act_text,
+            "revised_content": cleaned_content,
+            "completion": _build_completion_fallback(cleaned_content, outline, script_format=script_format),
+            "accepted_with_issues": False,
+            "warning": "",
+            "generated": False,
+        }
+
+    prompt = _build_current_act_revision_prompt(
+        context,
+        review,
+        characters=characters,
+        idea=idea,
+    )
+    act_label = context.get("act_label") or "当前幕"
+    start_scene_index = _extract_first_scene_index(act_text) or max(
+        1,
+        _extract_next_scene_index(context.get("previous_content") or ""),
+    )
+    fallback_heading = (
+        _extract_scene_heading_from_block(_extract_scene_blocks(act_text)[0])
+        if _extract_scene_blocks(act_text)
+        else _extract_latest_scene(act_text)
+    )
+    last_failure_reason = "模型没有返回可用的修订版正文"
+    last_candidate = ""
+    attempt_prompt = prompt
+
+    for attempt in range(2):
+        try:
+            normalized = _generate_complete_act_candidate(
+                attempt_prompt,
+                act_label=act_label,
+                section_index=1,
+                start_scene_index=start_scene_index,
+                fallback_heading=fallback_heading,
+                max_tokens=4200,
+            )
+        except Exception:
+            normalized = ""
+
+        if not normalized:
+            last_failure_reason = "模型没有返回可用的修订版正文"
+            if attempt == 0:
+                attempt_prompt = (
+                    f"{prompt}\n\n注意：上一轮没有返回有效的完整当前幕正文。"
+                    "这一次仍然只根据原稿和问题清单重写当前幕，必须直接输出一版可替换的完整当前幕剧本正文。"
+                )
+            continue
+
+        last_candidate = _strip_internal_scaffolding(normalized) or normalized
+        last_failure_reason = ""
+        break
+
+    revised_act = _strip_internal_scaffolding(last_candidate)
+    if not revised_act:
+        raise ValueError(last_failure_reason or "模型未能生成可用的修订版正文")
+
+    previous_content = context.get("previous_content") or ""
+    revised_content = (
+        _strip_internal_scaffolding(f"{previous_content}\n\n{revised_act}")
+        if previous_content
+        else revised_act
+    )
+
+    return {
+        "act_label": act_label,
+        "analysis": review,
+        "revised_act": revised_act,
+        "revised_content": revised_content,
+        "completion": _build_completion_fallback(revised_content, outline, script_format=script_format),
+        "accepted_with_issues": False,
+        "warning": "",
+        "generated": True,
+    }
+
+
 def _build_target_keyword_hint(target: str, empty_text: str = "根据当前节点自然推进") -> str:
     keywords = _extract_focus_keywords(target, limit=4)
     return "、".join(keywords) if keywords else empty_text
 
 
-def _validate_generated_beat(
+def _detect_outline_backtracking(
+    candidate: str,
+    outline_progress: dict[str, Any],
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    current_target = outline_progress.get("current_target") or ""
+    if not current_target:
+        return {"backtracking": False, "reason": ""}
+
+    current_eval = _estimate_outline_item_coverage(current_target, candidate, script_format)
+    current_strength = max(float(current_eval.get("coverage") or 0.0), float(current_eval.get("similarity") or 0.0))
+    strongest_repeat: dict[str, Any] | None = None
+
+    for item in (outline_progress.get("covered_items") or [])[-3:]:
+        text = item.get("text") or ""
+        if not text:
+            continue
+
+        item_eval = _estimate_outline_item_coverage(text, candidate, script_format)
+        item_strength = max(float(item_eval.get("coverage") or 0.0), float(item_eval.get("similarity") or 0.0))
+        if not item_eval.get("covered") or item_strength < 0.78:
+            continue
+
+        if strongest_repeat is None or item_strength > strongest_repeat["strength"]:
+            strongest_repeat = {
+                "text": text,
+                "strength": item_strength,
+            }
+
+    if strongest_repeat and strongest_repeat["strength"] >= current_strength + 0.12:
+        return {
+            "backtracking": True,
+            "reason": f"新一幕又把已完成节点写成了核心事件：{strongest_repeat['text']}",
+        }
+
+    return {"backtracking": False, "reason": ""}
+
+
+def _validate_generated_act(
     candidate: str,
     content: str,
     outline_progress: dict[str, Any],
     outline: str = "",
+    idea: str = "",
+    characters: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
 ) -> dict[str, Any]:
-    repetition = _detect_recent_repetition(content, candidate)
-    if repetition.get("repetition_detected"):
-        return {"ok": False, "reason": repetition.get("reason") or "新场次与最近内容重复"}
+    if _contains_internal_scaffolding(candidate):
+        return {"ok": False, "reason": "新一幕混入了校验备注或动作描述等内部脚手架"}
 
-    current_target = outline_progress.get("current_target") or ""
-    if current_target:
-        target_eval = _estimate_outline_item_coverage(current_target, candidate)
-        if not target_eval.get("covered"):
-            return {"ok": False, "reason": f"新场次没有真正推进当前应写的大纲节点：{current_target}"}
+    cleaned_candidate = _strip_internal_scaffolding(candidate)
+    if not cleaned_candidate:
+        return {"ok": False, "reason": "新一幕没有返回有效剧本文本"}
+
+    repetition = _detect_recent_repetition(content, cleaned_candidate)
+    if repetition.get("repetition_detected"):
+        return {"ok": False, "reason": repetition.get("reason") or "新一幕与最近内容重复"}
+
+    backtracking = _detect_outline_backtracking(cleaned_candidate, outline_progress)
+    if backtracking.get("backtracking"):
+        return {"ok": False, "reason": backtracking.get("reason") or "新一幕回退到了已完成节点"}
+
+    written_act_labels = _extract_written_act_labels(content, script_format)
+    first_act_label = get_act_sequence(script_format)[0]
+    if written_act_labels:
+        target_act_label = _next_act_label_after(written_act_labels[-1], script_format) or written_act_labels[-1]
+    else:
+        target_act_label = _normalize_act_label(outline_progress.get("section_label") or "")
+        if not target_act_label:
+            pending_items = outline_progress.get("pending_items", [])
+            if pending_items:
+                target_act_label = _normalize_act_label(pending_items[0].get("section") or "")
+        if not target_act_label:
+            target_act_label = first_act_label
+
+    candidate_act_labels = _extract_written_act_labels(cleaned_candidate, script_format)
+    if candidate_act_labels and any(label != target_act_label for label in candidate_act_labels):
+        return {"ok": False, "reason": f"新一幕越过了当前应写的{target_act_label}，混入了后续幕次"}
 
     if outline.strip() and outline_progress.get("items"):
-        before_covered = len(outline_progress.get("covered_items") or [])
-        merged_progress = _extract_outline_progress(outline, f"{content}\n\n{candidate}")
-        after_covered = len(merged_progress.get("covered_items") or [])
-        target_still_pending = False
+        merged_progress = _extract_outline_progress(outline, f"{content}\n\n{cleaned_candidate}", script_format)
+        remaining_target_items = [
+            item
+            for item in merged_progress.get("pending_items", [])
+            if _normalize_act_label(item.get("section") or "") == target_act_label
+        ]
+        if remaining_target_items:
+            return {
+                "ok": False,
+                "reason": f"{target_act_label}写完后仍未完成本幕节点：{remaining_target_items[0].get('text', target_act_label)}",
+            }
 
-        if current_target:
-            normalized_target = _normalize_match_text(current_target)
-            for item in merged_progress.get("pending_items", []):
-                if _normalize_match_text(item.get("text", "")) == normalized_target:
-                    target_still_pending = True
-                    break
+    if idea.strip():
+        alignment = evaluate_story_alignment(cleaned_candidate, idea, stage="script")
+        if not alignment.get("is_valid", True):
+            missing = alignment.get("required_missing") or alignment.get("missing_groups") or []
+            primary = ""
+            if missing:
+                primary = missing[0].get("primary") or missing[0].get("label") or ""
+            return {
+                "ok": False,
+                "reason": f"新一幕脱离了最早设定，缺少核心锚点：{primary or '题设主线'}",
+            }
 
-        if target_still_pending:
-            return {"ok": False, "reason": f"新场次写完后，大纲节点仍未完成：{current_target}"}
+    if characters.strip():
+        expected_names = [name for name in re.findall(r"姓名[:：]\s*([\u4e00-\u9fff]{2,6})", characters) if name]
+        if expected_names and not any(name in cleaned_candidate for name in expected_names):
+            return {
+                "ok": False,
+                "reason": f"新一幕没有承接人物设定，缺少核心角色：{expected_names[0]}",
+            }
 
-        if outline_progress.get("pending_items") and after_covered <= before_covered:
-            return {"ok": False, "reason": "新场次没有让大纲覆盖进度继续前进"}
-
-    return {"ok": True, "reason": ""}
+    return {"ok": True, "reason": "", "cleaned": cleaned_candidate}
 
 
-def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
-    cleaned = _normalize_script(content)
-    outline_progress = _extract_outline_progress(outline, cleaned)
+def _build_completion_fallback(
+    content: str,
+    outline: str,
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    cleaned = _strip_internal_scaffolding(content)
+    outline_progress = _extract_outline_progress(outline, cleaned, script_format)
+    act_progress = _build_act_progress_state(outline_progress, cleaned, script_format)
     outline_points = outline_progress.get("items", [])
     scene_count = _extract_scene_count(cleaned)
     tail = cleaned[-1800:]
+    final_act_label = get_last_act_label(script_format)
 
     covered_items = outline_progress.get("covered_items", [])
     pending_items = outline_progress.get("pending_items", [])
     critical_pending_items: list[dict[str, Any]] = []
     soft_pending_items: list[dict[str, Any]] = []
+    final_act_reached = final_act_label in act_progress.get("written_act_labels", []) or (
+        act_progress.get("current_act_label") == final_act_label
+    )
 
     for item in pending_items:
-        if _is_soft_closure_pending(item):
+        if _is_soft_closure_pending(item, script_format):
             soft_pending_items.append(item)
         else:
             critical_pending_items.append(item)
@@ -1293,8 +1933,13 @@ def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
         elif occurrences == 1:
             dangling_threads.append(keyword)
 
-    ending_reached = any(keyword in tail for keyword in ENDING_KEYWORDS)
-    minimum_scenes = 2 if not outline_points else 3
+    ending_reached = final_act_label in act_progress.get("written_act_labels", []) or any(
+        keyword in tail for keyword in ENDING_KEYWORDS
+    )
+    act_count = len(get_act_sequence(script_format))
+    minimum_scenes = 2 if act_count <= 2 else 3
+    if not outline_points:
+        minimum_scenes = max(2, minimum_scenes - 1)
     is_complete = (
         scene_count >= minimum_scenes
         and ending_reached
@@ -1307,19 +1952,27 @@ def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
     )
 
     if is_complete:
-        reason = "当前剧本已经完整覆盖大纲主线，并且结尾段落完成了收束。"
+        reason = f"当前剧本已经完整覆盖大纲主线，并且{final_act_label}完成了收束。"
+    elif final_act_reached and missing_points:
+        reason = f"当前题材的全部幕次已经生成完成，但还有内容需要修正：{missing_points[0]}"
+    elif final_act_reached and soft_missing_points:
+        reason = f"当前题材的全部幕次已经生成完成，但{final_act_label}还没有完全收束：{soft_missing_points[0]}"
+    elif final_act_reached and dangling_threads:
+        reason = f"当前题材的全部幕次已经生成完成，但仍有关键伏笔没有明显回收：{dangling_threads[0]}"
     elif repetition.get("repetition_detected"):
         reason = repetition.get("reason") or "最近几场出现了重复生成，当前不应继续机械续写。"
     elif missing_points:
         reason = f"仍有大纲内容未充分落地：{missing_points[0]}"
     elif soft_missing_points:
-        reason = f"结尾节点还没有完全收束：{soft_missing_points[0]}"
+        reason = f"{final_act_label}还没有完全收束：{soft_missing_points[0]}"
     elif dangling_threads:
         reason = f"仍有关键伏笔没有明显回收：{dangling_threads[0]}"
     elif not ending_reached:
-        reason = "当前文本还没有进入明确的结尾收束段落。"
+        reason = f"当前文本还没有进入明确的{final_act_label}收束段落。"
     else:
         reason = "当前剧本还在推进阶段，尚未达到自动完结条件。"
+
+    generation_locked = is_complete or final_act_reached
 
     return {
         "is_complete": is_complete,
@@ -1337,159 +1990,116 @@ def _build_completion_fallback(content: str, outline: str) -> dict[str, Any]:
         "current_target": outline_progress.get("current_target", ""),
         "next_target": outline_progress.get("next_target", ""),
         "section_label": outline_progress.get("section_label", ""),
+        "current_act_label": act_progress.get("current_act_label", ""),
+        "next_act_label": act_progress.get("next_act_label", ""),
+        "completed_act_labels": act_progress.get("completed_act_labels", []),
+        "written_act_labels": act_progress.get("written_act_labels", []),
+        "final_act_reached": final_act_reached,
         "repetition_detected": bool(repetition.get("repetition_detected")),
         "repetition_reason": repetition.get("reason", ""),
-        "can_continue": not is_complete,
+        "generation_locked": generation_locked,
+        "can_continue": not generation_locked,
         "source": "fallback",
     }
 
 
-def _evaluate_script_completion(content: str, outline: str) -> dict[str, Any]:
-    fallback = _build_completion_fallback(content, outline)
-
-    try:
-        assessment = _assess_completion_with_model(content, outline)
-    except Exception:
-        assessment = None
-
-    if not assessment:
-        return fallback
-
-    missing_points: list[str] = []
-    for item in assessment.get("missing_points", []) + fallback.get("missing_points", []):
-        if item and item not in missing_points:
-            missing_points.append(item)
-
-    resolved_threads: list[str] = []
-    for item in assessment.get("resolved_threads", []) + fallback.get("resolved_threads", []):
-        if item and item not in resolved_threads:
-            resolved_threads.append(item)
-
-    fallback_complete = bool(
-        fallback.get("ending_reached")
-        and not fallback.get("missing_points")
-        and not fallback.get("soft_missing_points")
-        and not fallback.get("repetition_detected")
-        and not fallback.get("dangling_threads")
-    )
-    blocking_missing = bool(missing_points)
-    blocking_soft_missing = bool(fallback.get("soft_missing_points"))
-    blocking_dangling = bool(fallback.get("dangling_threads"))
-    is_complete = bool(fallback.get("is_complete")) or (
-        bool(assessment.get("is_complete"))
-        and fallback_complete
-        and not blocking_missing
-        and not blocking_soft_missing
-        and not blocking_dangling
-    )
-
-    if is_complete:
-        reason = str(assessment.get("reason") or fallback.get("reason") or "当前剧本已经完成收束。").strip()
-    elif fallback.get("repetition_detected"):
-        reason = fallback.get("reason") or "最近几场出现了重复生成，当前不应继续机械续写。"
-    elif missing_points:
-        reason = f"仍有大纲内容未充分落地：{missing_points[0]}"
-    elif blocking_soft_missing:
-        reason = f"结尾节点还没有完全收束：{fallback['soft_missing_points'][0]}"
-    elif blocking_dangling:
-        reason = f"仍有关键伏笔没有明显回收：{fallback['dangling_threads'][0]}"
-    elif not fallback.get("ending_reached"):
-        reason = "当前文本还没有进入明确的结尾收束段落。"
-    else:
-        reason = str(assessment.get("reason") or fallback.get("reason") or "当前剧本还在推进阶段。").strip()
-
-    merged = fallback.copy()
-    merged.update(
-        {
-            "is_complete": is_complete,
-            "reason": reason,
-            "missing_points": missing_points[:6],
-            "resolved_threads": resolved_threads[:6],
-            "source": "hybrid",
-            "can_continue": not is_complete,
-        }
-    )
-    return merged
-
-
-def _build_next_beat_prompt(content: str, outline: str, characters: str) -> dict[str, Any]:
-    cleaned = _normalize_script(content)
+def _build_next_act_prompt(
+    content: str,
+    outline: str,
+    characters: str,
+    idea: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    cleaned = _strip_internal_scaffolding(content)
     current_scene = _extract_latest_scene(cleaned)
     prop = _extract_recent_prop(cleaned)
-    beat_index = _extract_next_beat_index(cleaned)
-    act_context = _resolve_next_act_context(outline, cleaned, beat_index)
-    act_label = act_context["section_label"]
-    section_index = act_context["section_index"]
+    start_scene_index = _extract_next_scene_index(cleaned)
+    act_context = _resolve_next_act_context(outline, cleaned, start_scene_index, script_format=script_format)
+    act_label = act_context["act_label"]
+    section_index = 1
     current_target = act_context["current_target"]
     next_target = act_context["next_target"]
     outline_progress = act_context["outline_progress"]
-    progression_hint = _build_progression_hint(beat_index)
+    act_pending_items = act_context.get("act_pending_items", [])
+    act_completed_items = act_context.get("act_completed_items", [])
+    next_act_label = act_context.get("next_act_label", "")
+    progression_hint = _build_progression_hint(start_scene_index)
     last_dialogue_hint = _extract_last_dialogue_hint(cleaned)
+    idea_guardrails = build_story_guardrail_block(idea, "script") if idea.strip() else "若无补充设定，严格沿用人物设定、剧情大纲和已有正文。"
+    idea_excerpt = _normalize_script(idea)[:900] if idea.strip() else "未提供额外核心设定原文。"
     recent_scene_digest = _build_recent_scene_digest(cleaned, limit=3)
-    covered_digest = _build_outline_digest(
-        outline_progress.get("covered_items", [])[-2:],
-        "暂无已完成节点摘要。",
-        limit=2,
-    )
+    covered_digest = _build_outline_digest(act_completed_items[-3:], "本幕暂无已完成节点摘要。", limit=3)
     pending_digest = _build_outline_digest(
-        outline_progress.get("pending_items", []),
-        "大纲主线已基本覆盖，下一场应完成结尾收束。",
-        limit=3,
+        act_pending_items,
+        f"{act_label}需根据已有正文自然收口。",
+        limit=4,
     )
-    remaining_count = len(outline_progress.get("pending_items", []))
+    remaining_count = len(act_pending_items)
     current_target_keywords = _build_target_keyword_hint(current_target)
     next_target_keywords = _build_target_keyword_hint(next_target, empty_text="根据剧情自然衔接")
-    should_force_closure = bool(
-        outline_progress.get("items")
-        and (
-            remaining_count <= 1
-            or len(outline_progress.get("covered_items", [])) >= max(1, len(outline_progress.get("items", [])) - 1)
-        )
-    )
-    closure_instruction = (
-        "本场必须完成主线冲突结算、关键伏笔回收和结局余韵，不要再开启新的主线。"
-        if should_force_closure
-        else "本场必须让大纲覆盖进度前进一步，只允许引出与当前节点直接相关的新后果。"
+    format_label = get_script_format_label(script_format)
+    if act_label == get_last_act_label(script_format):
+        closure_instruction = f"本次必须完整写完{act_label}，完成主线收束、伏笔回收和最后余韵，不要再开启新的主线。"
+    else:
+        closure_instruction = f"本次必须把{act_label}完整讲完，写完就停，不要抢写{next_act_label or '后续幕次'}。"
+    act_target_line = current_target or f"完整写完{act_label}"
+
+    completed_digest = _build_outline_digest(
+        outline_progress.get("covered_items", []),
+        "暂无已完成节点，先把当前触发事件落地。",
+        limit=4,
     )
 
-    prompt = f"""你是专业中文编剧，请只续写“下一场”，并严格对齐剧情大纲。
+    prompt = f"""你是专业中文编剧，请只续写“下一幕”剧本正文，并严格对齐剧情大纲。当前剧本形式题材是“{format_label}”。你现在写的是可拍摄的戏，不是分析、不是流程说明、不是校验备注。
 硬性要求：
-1. 只输出新增这一场的正文，不要解释，不要总结，不要重复前文。
-2. 本场唯一必须完成的大纲节点：{current_target or '延续当前主线推进'}。
-3. 写完本场后，大纲覆盖进度必须前进一步；如果没有推进到这个节点，这次续写视为失败。
-4. {closure_instruction}
-5. 开头必须依次输出：
-   - {act_label}·第{section_index}节
-   - 第{beat_index}场
-   - 一个新的中文场景标题（内景/外景 + 场所 + 时间）
-6. 必须包含：承接上场、动作描述、人物对白、明确的新后果；本场结尾要能看出节点已经被推进。
-7. 禁止复用最近几场的场景标题、核心对白、动作调度和情绪铺陈。
-8. 禁止空转、重复解释、只抒情不推进，也不要突然跳去无关支线。
-9. 不要把大纲改写成碎片化摘要，每场只完成一到两个核心动作，场与场之间要有清晰因果。
-10. 不允许只“提到”当前节点关键词，必须让它在本场里变成行动、揭示、决定或后果。
+1. 只输出新增这一幕的正文，不要解释，不要总结，不要重复前文。
+2. 这次只允许写{act_label}，不要越过到{next_act_label or '后续幕次'}。
+3. {closure_instruction}
+4. {act_label}内部最多分 3 节；只有切换到下一节时，才允许再次输出“{act_label}·第2节”这类标签。
+5. 同一节内的后续场次不要重复叠加相同的幕节标题，更不要出现“剧情推进·第1节 第4场”这类混合标签。
+6. 场次编号必须从第{start_scene_index}场开始顺延，每个“第X场”只能出现一次，严禁重复把同一个场次编号写多次。
+7. 本幕场次格式固定为：
+   - 当进入新的一节时：{act_label}·第1节 / 第2节 / 第3节
+   - 第{start_scene_index}场 / 第{start_scene_index + 1}场 / 第{start_scene_index + 2}场 ...
+   - 中文场景标题（内景/外景 + 场所 + 时间）
+   - 场景动作与人物对白
+8. 尽量把这一幕控制在 3500 字左右，但如果本幕要写完整，优先保证完整，不要因为担心字数而中途停下。
+9. 必须直接在场景动作和人物对白里体现承接关系、行动、冲突和明确的新后果；本幕结尾要能看出这一幕已经完成。
+10. 禁止复用最近几场的场景标题、核心对白、动作调度和情绪铺陈。
+11. 禁止空转、重复解释、只抒情不推进，也不要突然跳去无关支线。
+12. 正文里严禁出现“校验备注”“上一场位于”“当前目标”“动作描述”“承接上场”“承接上节”等内部提示词或说明性小标题。
 
-当前场次目标：
-- 当前节点：{current_target or '延续当前主线推进'}
+当前幕次目标：
+- 当前幕次：{act_label}
+- 本幕必须完成的关键节点：{act_target_line}
 - 当前节点关键词：{current_target_keywords}
-- 下一节点：{next_target or '根据剧情自然衔接下一步'}
-- 下一节点关键词：{next_target_keywords}
-- 剩余待完成节点数：{remaining_count}
-- 本场策略：{closure_instruction}
+- 下一幕承接点：{next_target or next_act_label or '根据剧情自然衔接'}
+- 下一幕关键词：{next_target_keywords}
+- 本幕剩余待完成节点数：{remaining_count}
 
 最近几场摘要：
 {recent_scene_digest or '- 暂无最近场次摘要'}
 
-已经完成的大纲节点：
+这些节点已经写过了，本次禁止再把它们当成核心事件重写：
+{completed_digest}
+
+本幕已完成的大纲节点：
 {covered_digest}
 
-仍待完成的大纲节点：
+本幕仍待完成的大纲节点：
 {pending_digest}
 
 人物设定：
 {characters or '沿用已有正文中的人物关系'}
 
-上一场关键信息：
-- 上一场场景：{current_scene}
+最早核心设定：
+{idea_excerpt}
+
+题设锚点约束：
+{idea_guardrails}
+
+上一段关键信息：
+- 最近场景：{current_scene}
 - 关键对白：{last_dialogue_hint}
 - 关键线索：{prop}
 - 推进提示：{progression_hint}
@@ -1500,243 +2110,286 @@ def _build_next_beat_prompt(content: str, outline: str, characters: str) -> dict
 
     return {
         "prompt": prompt,
-        "beat_index": beat_index,
+        "start_scene_index": start_scene_index,
         "act_label": act_label,
         "section_index": section_index,
         "current_scene": current_scene,
         "current_target": current_target,
         "next_target": next_target,
+        "next_act_label": next_act_label,
+        "act_pending_items": act_pending_items,
         "outline_progress": outline_progress,
     }
 
 
-def _build_next_beat_text(content: str, outline: str = "", characters: str = "") -> str:
-    prompt_payload = _build_next_beat_prompt(content, outline, characters)
+def _build_next_act_text(
+    content: str,
+    outline: str = "",
+    characters: str = "",
+    idea: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> str:
+    return _build_next_act_result(
+        content,
+        outline=outline,
+        characters=characters,
+        idea=idea,
+        script_format=script_format,
+    ).get("text", "")
+
+
+def _build_next_act_result(
+    content: str,
+    outline: str = "",
+    characters: str = "",
+    idea: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
+) -> dict[str, Any]:
+    prompt_payload = _build_next_act_prompt(content, outline, characters, idea=idea, script_format=script_format)
     prompt = prompt_payload["prompt"]
-    beat_index = prompt_payload["beat_index"]
+    start_scene_index = prompt_payload["start_scene_index"]
     act_label = prompt_payload["act_label"]
-    section_index = prompt_payload["section_index"]
     current_scene = prompt_payload["current_scene"]
-    current_target = prompt_payload["current_target"]
-    next_target = prompt_payload["next_target"]
     outline_progress = prompt_payload["outline_progress"]
-    protagonist = _extract_primary_character(content)
-    fallback_heading = _infer_next_scene_title(current_scene, beat_index)
+    fallback_heading = _infer_next_scene_title(current_scene, start_scene_index)
 
-    last_failure_reason = ""
+    last_failure_reason = "模型没有返回可用的新一幕内容"
+    last_candidate = ""
 
-    for attempt in range(3):
-        attempt_prompt = (
-            prompt
-            if attempt == 0
-            else _build_retry_prompt(prompt, last_failure_reason or "上一版没有通过校验", current_target, next_target)
-        )
+    for attempt in range(1):
+        attempt_prompt = prompt
 
         try:
-            generated, _ = generate_clean_content(attempt_prompt, max_tokens=1800)
-            generated = enforce_script_labels(generated)
-            normalized = _normalize_script(generated)
+            normalized = _generate_complete_act_candidate(
+                attempt_prompt,
+                act_label=act_label,
+                section_index=1,
+                start_scene_index=start_scene_index,
+                fallback_heading=fallback_heading,
+                max_tokens=4200,
+            )
         except Exception:
             normalized = ""
 
         if not normalized:
-            last_failure_reason = "模型没有返回可用的新场次内容"
+            last_failure_reason = "模型没有返回可用的新一幕内容"
             continue
 
-        if f"第{beat_index}场" not in normalized or not re.search(r"^(内景|外景)", normalized, flags=re.MULTILINE):
-            normalized = _normalize_script(
-                f"""{act_label}·第{section_index}节
-第{beat_index}场
-{fallback_heading}
-
-承接上场
-上一场位于：{current_scene}
-当前目标：{current_target or '延续当前主线推进'}
-
-{normalized}
-"""
-            )
-
-        validation = _validate_generated_beat(normalized, content, outline_progress, outline)
+        last_candidate = normalized
+        validation = _validate_generated_act(
+            normalized,
+            content,
+            outline_progress,
+            outline,
+            idea=idea,
+            characters=characters,
+            script_format=script_format,
+        )
         if validation.get("ok"):
-            return normalized
+            return {
+                "text": validation.get("cleaned") or normalized,
+                "reason": "",
+                "validation": _build_generation_review_validation(is_valid=True),
+                "accepted_with_issues": False,
+            }
 
-        last_failure_reason = validation.get("reason") or "新场次校验未通过"
+        last_failure_reason = validation.get("reason") or "新一幕校验未通过"
 
-    fallback_target = current_target or "推动剧情进入新的阶段，并形成明确的新后果。"
-    bridge_target = next_target or "为后续场次留下新的行动方向。"
-    fallback_reason = last_failure_reason or "模型续写未能稳定推进当前节点"
+    if last_candidate:
+        return {
+            "text": last_candidate,
+            "reason": last_failure_reason or "新一幕需要人工检查",
+            "validation": _build_generation_review_validation(
+                is_valid=False,
+                reason=last_failure_reason or "新一幕需要人工检查",
+                corrected=True,
+                accepted_with_issues=True,
+            ),
+            "accepted_with_issues": True,
+        }
 
-    return _normalize_script(
-        f"""{act_label}·第{section_index}节
-第{beat_index}场
-{fallback_heading}
-
-承接上场
-上一场位于：{current_scene}
-当前目标：{fallback_target}
-校验备注：{fallback_reason}
-
-动作描述
-{protagonist}没有停留在上一场的情绪里，而是立刻针对“{fallback_target}”展开行动。新的信息被揭开，局势因此发生了不可逆的变化，同时也为“{bridge_target}”埋下了更具体的后果。
-
-{protagonist}
-这一次，我们不能再原地打转了。
-"""
-    )
+    return {
+        "text": "",
+        "reason": last_failure_reason or "模型未能生成通过校验的新一幕",
+        "validation": _build_generation_review_validation(
+            is_valid=False,
+            reason=last_failure_reason or "模型未能生成通过校验的新一幕",
+            corrected=True,
+            accepted_with_issues=False,
+        ),
+        "accepted_with_issues": False,
+    }
 
 
-def _generate_outline_aligned_beats(
+def _generate_next_act(
     content: str,
     outline: str = "",
     characters: str = "",
-    max_beats: int = 1,
+    idea: str = "",
+    script_format: str = DEFAULT_SCRIPT_FORMAT,
 ) -> dict[str, Any]:
-    merged_content = _normalize_script(content)
-    completion = _evaluate_script_completion(merged_content, outline)
-    generated_beats: list[str] = []
-    max_beats = max(1, int(max_beats or 1))
+    merged_content = _strip_internal_scaffolding(content)
+    completion = _build_completion_fallback(merged_content, outline, script_format=script_format)
+    if completion.get("is_complete") or completion.get("generation_locked") or completion.get("can_continue") is False:
+        return {
+            "text": "",
+            "merged_content": merged_content,
+            "completion": completion,
+            "is_complete": bool(completion.get("is_complete")),
+            "error": "",
+            "validation": _build_generation_review_validation(is_valid=True),
+            "accepted_with_issues": False,
+        }
 
-    for _ in range(max_beats):
-        if completion.get("is_complete"):
-            break
+    act_result = _build_next_act_result(
+        merged_content,
+        outline=outline,
+        characters=characters,
+        idea=idea,
+        script_format=script_format,
+    )
+    next_act = _strip_internal_scaffolding(act_result.get("text", ""))
+    validation = act_result.get("validation") or _build_generation_review_validation(is_valid=True)
+    accepted_with_issues = bool(act_result.get("accepted_with_issues"))
 
-        next_beat = _normalize_script(_build_next_beat_text(merged_content, outline=outline, characters=characters))
-        if not next_beat:
-            break
-
-        generated_beats.append(next_beat)
-        merged_content = _normalize_script(f"{merged_content}\n\n{next_beat}") if merged_content else next_beat
-        completion = _evaluate_script_completion(merged_content, outline)
+    if next_act:
+        merged_content = _strip_internal_scaffolding(f"{merged_content}\n\n{next_act}") if merged_content else next_act
+        completion = _build_completion_fallback(merged_content, outline, script_format=script_format)
 
     return {
-        "text": _normalize_script("\n\n".join(generated_beats)) if generated_beats else "",
-        "generated_beats": generated_beats,
-        "generated_count": len(generated_beats),
+        "text": next_act,
         "merged_content": merged_content,
         "completion": completion,
         "is_complete": bool(completion.get("is_complete")),
+        "error": act_result.get("reason", "") if not next_act else "",
+        "validation": validation,
+        "accepted_with_issues": accepted_with_issues,
     }
 
-
-@router.post("/plan")
-async def plan_narrative(requirements: dict[str, Any] = Body(...)):
-    try:
-        req_text = _build_requirement_text(requirements)
-        graph_plan = await narrative_gen.narrative_planning(req_text)
-        return {
-            "status": "success",
-            "beats": graph_plan.get("beats", []),
-            "data": graph_plan,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.post("/generate_scene")
-async def generate_scene(scene_req: dict[str, Any] = Body(...)):
-    context = scene_req.get("context", {})
-    rules = scene_req.get("rules", {})
-    max_retries = 2
-    attempts = 0
-    last_errors = []
-    logs = []
-
-    while attempts <= max_retries:
-        req_str = context.get("description", "")
-        scene_content = await narrative_gen.generate_scene_with_rules(req_str, rules)
-        logs.append(f"attempt {attempts + 1}: {scene_content}")
-
-        verify_result = await narrative_gen.narrative_verify(scene_content, rules)
-
-        if verify_result.get("is_valid"):
-            await narrative_gen.narrative_update(verify_result, graph_db=None)
-            return {
-                "status": "success",
-                "scene_content": scene_content,
-                "warnings": verify_result.get("soft_warnings", []),
-                "logs": logs,
-            }
-
-        last_errors = verify_result.get("hard_errors", [])
-        if last_errors:
-            logs.append(f"attempt {attempts + 1} failed: {last_errors[0].get('description', '')}")
-            rules["fix_instructions"] = [err.get("fix_instruction", "") for err in last_errors]
-        attempts += 1
-
-    return {
-        "status": "failed",
-        "error_msg": "scene generation failed after retries",
-        "suggestions": last_errors,
-        "logs": logs,
-    }
-
-
-@router.get("/graph")
-async def get_narrative_graph():
-    return {"status": "success", "data": neo4j_client.get_graph_data()}
-
-
-class BeatRequest(BaseModel):
+class ActRequest(BaseModel):
     content: str
     outline: Optional[str] = None
     characters: Optional[str] = None
+    idea: Optional[str] = None
+    script_format: str = DEFAULT_SCRIPT_FORMAT
 
 
-class CompletionRequest(BaseModel):
+class ActReviewRequest(BaseModel):
     content: str
     outline: Optional[str] = None
+    characters: Optional[str] = None
+    idea: Optional[str] = None
+    analysis: Optional[dict[str, Any]] = None
+    script_format: str = DEFAULT_SCRIPT_FORMAT
 
 
 @router.post("/sync_graph")
-async def sync_narrative_graph(req: BeatRequest):
-    data = neo4j_client.simulate_function_call_update(req.content)
+async def sync_narrative_graph(req: ActRequest):
+    data = neo4j_client.simulate_function_call_update(_strip_internal_scaffolding(req.content))
     return {"status": "success", "data": data}
 
 
-@router.post("/check_completion")
-async def check_script_completion(req: CompletionRequest):
-    content = _normalize_script(req.content)
+@router.post("/review_current_act")
+async def review_current_act(req: ActReviewRequest):
+    content = _strip_internal_scaffolding(req.content)
     if not content:
-        raise HTTPException(status_code=400, detail="当前剧本文本为空，无法检查完成度")
+        raise HTTPException(status_code=400, detail="当前剧本文本为空，无法分析当前幕")
 
-    completion = _evaluate_script_completion(content, req.outline or "")
-    return {"status": "success", "completion": completion}
-
-
-@router.post("/generate_beat")
-async def generate_next_beat(req: BeatRequest):
-    content = _normalize_script(req.content)
-    if not content:
-        raise HTTPException(status_code=400, detail="当前剧本文本为空，无法生成下一节拍")
-
-    completion_before = _evaluate_script_completion(content, req.outline or "")
-    if completion_before.get("is_complete"):
-        graph_data = neo4j_client.simulate_function_call_update(content)
-        return {
-            "status": "success",
-            "text": "",
-            "data": graph_data,
-            "completion": completion_before,
-            "is_complete": True,
-        }
-
-    generation = _generate_outline_aligned_beats(
+    script_format = normalize_script_format(req.script_format)
+    analysis = _build_current_act_review(
         content,
         outline=req.outline or "",
+        idea=req.idea or "",
         characters=req.characters or "",
-        max_beats=1,
+        script_format=script_format,
     )
-    next_beat = generation.get("text", "")
-    merged = generation.get("merged_content") or content
-    graph_data = neo4j_client.simulate_function_call_update(merged)
-    completion = generation.get("completion") or _evaluate_script_completion(merged, req.outline or "")
+    return {"status": "success", "analysis": analysis}
+
+
+@router.post("/revise_current_act")
+async def revise_current_act(req: ActReviewRequest):
+    content = _strip_internal_scaffolding(req.content)
+    if not content:
+        raise HTTPException(status_code=400, detail="当前剧本文本为空，无法修订当前幕")
+
+    script_format = normalize_script_format(req.script_format)
+    try:
+        result = _revise_current_act(
+            content,
+            outline=req.outline or "",
+            characters=req.characters or "",
+            idea=req.idea or "",
+            analysis=req.analysis,
+            script_format=script_format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"当前幕修订失败：{exc}") from exc
 
     return {
         "status": "success",
-        "text": next_beat,
+        "act_label": result.get("act_label", ""),
+        "analysis": result.get("analysis", {}),
+        "revised_act": result.get("revised_act", ""),
+        "revised_content": result.get("revised_content", ""),
+        "completion": result.get("completion", {}),
+        "accepted_with_issues": bool(result.get("accepted_with_issues")),
+        "warning": result.get("warning", ""),
+        "generated": bool(result.get("generated")),
+    }
+
+
+@router.post("/generate_act")
+async def generate_next_act(req: ActRequest):
+    content = _strip_internal_scaffolding(req.content)
+    if not content:
+        raise HTTPException(status_code=400, detail="当前剧本文本为空，无法生成下一幕")
+
+    script_format = normalize_script_format(req.script_format)
+    generation = _generate_next_act(
+        content,
+        outline=req.outline or "",
+        characters=req.characters or "",
+        idea=req.idea or "",
+        script_format=script_format,
+    )
+    next_act = generation.get("text", "")
+    if not next_act:
+        completion = generation.get("completion") or _build_completion_fallback(
+            content,
+            req.outline or "",
+            script_format=script_format,
+        )
+        if completion.get("generation_locked") or completion.get("can_continue") is False:
+            graph_data = neo4j_client.simulate_function_call_update(content)
+            return {
+                "status": "success",
+                "text": "",
+                "data": graph_data,
+                "completion": completion,
+                "is_complete": bool(completion.get("is_complete")),
+                "generation_locked": bool(completion.get("generation_locked")),
+                "validation": generation.get("validation") or _build_generation_review_validation(is_valid=True),
+                "accepted_with_issues": bool(generation.get("accepted_with_issues")),
+            }
+        raise HTTPException(
+            status_code=502,
+            detail=generation.get("error") or "下一幕生成失败：模型未返回通过校验的新正文",
+        )
+    merged = generation.get("merged_content") or content
+    graph_data = neo4j_client.simulate_function_call_update(merged)
+    completion = generation.get("completion") or _build_completion_fallback(
+        merged,
+        req.outline or "",
+        script_format=script_format,
+    )
+
+    return {
+        "status": "success",
+        "text": next_act,
         "data": graph_data,
         "completion": completion,
-        "generated_count": generation.get("generated_count", 0),
         "is_complete": bool(completion.get("is_complete")),
+        "generation_locked": bool(completion.get("generation_locked")),
+        "validation": generation.get("validation") or _build_generation_review_validation(is_valid=True),
+        "accepted_with_issues": bool(generation.get("accepted_with_issues")),
     }

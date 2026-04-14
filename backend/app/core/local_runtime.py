@@ -73,17 +73,6 @@ def heartbeat(client_id: str) -> dict:
         return _snapshot(now)
 
 
-def release(client_id: str) -> dict:
-    if not LOCAL_APP_ENABLED:
-        return {"enabled": False}
-
-    now = time.monotonic()
-    with _lock:
-        _clients.pop(client_id, None)
-        _prune_expired_clients(now)
-        return _snapshot(now)
-
-
 def _shutdown_process(reason: str) -> None:
     global _shutdown_started
 
