@@ -4,7 +4,7 @@ chcp 65001 >nul
 
 cd /d "%~dp0"
 
-set "MANAGED_BROWSER=1"
+rem Use the system default browser so the latest local page opens in the user's browser.
 call "%~dp0start_local_web.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
 

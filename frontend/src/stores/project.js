@@ -2,6 +2,7 @@ import { reactive, watch } from 'vue'
 
 const AUTOSAVE_KEY = 'AI_SCREENPLAY_VERSIONS_V2'
 const MANUAL_SAVE_KEY = 'AI_SCREENPLAY_MANUAL_VERSIONS'
+const NEXT_SERIES_EPISODE_KEY = 'AI_SCREENPLAY_NEXT_SERIES_EPISODE'
 const AUTOSAVE_DEBOUNCE_MS = 5 * 60 * 1000
 const MAX_VERSIONS = 15
 const MAX_MANUAL_VERSIONS = 3
@@ -218,7 +219,85 @@ export function resetProjectWorkspace() {
 
   localStorage.removeItem(AUTOSAVE_KEY)
   localStorage.removeItem(MANUAL_SAVE_KEY)
+  if (typeof window !== 'undefined') {
+    sessionStorage.removeItem(NEXT_SERIES_EPISODE_KEY)
+  }
   Object.assign(globalState, cloneDefaultState())
+}
+
+function normalizeNextSeriesEpisodePrefill(prefill = '') {
+  if (prefill && typeof prefill === 'object') {
+    return {
+      previousEnding: String(prefill.previousEnding ?? '').trim(),
+      characterFocus: String(prefill.characterFocus ?? '').trim(),
+      toneDirection: String(prefill.toneDirection ?? '').trim(),
+      cliffhanger: String(prefill.cliffhanger ?? '').trim(),
+    }
+  }
+
+  return {
+    previousEnding: String(prefill || '').trim(),
+    characterFocus: '',
+    toneDirection: '',
+    cliffhanger: '',
+  }
+}
+
+function buildNextSeriesEpisodeState(prefill = '') {
+  const normalizedPrefill = normalizeNextSeriesEpisodePrefill(prefill)
+  return {
+    pipelineScriptFormat: 'series',
+    pipelineSeriesPreviousEnding: normalizedPrefill.previousEnding,
+    pipelineSeriesCharacterFocus: normalizedPrefill.characterFocus,
+    pipelineSeriesToneDirection: normalizedPrefill.toneDirection,
+    pipelineSeriesCliffhanger: normalizedPrefill.cliffhanger,
+    pipelineRequirements: '',
+    pipelineCharacters: '',
+    pipelineOutline: '',
+    pipelineActiveStep: 0,
+    pipelineLatestActReviewed: false,
+    pipelineIsScriptEnd: false,
+    pipelineCompletionReason: '',
+    pipelineCompletionSnapshot: null,
+    pipelineGenerationInFlight: false,
+    pipelineGenerationTargetAct: '',
+    scriptContent: '',
+  }
+}
+
+export function prepareNextSeriesEpisode(prefill = '') {
+  Object.assign(globalState, buildNextSeriesEpisodeState(prefill))
+}
+
+export function queueNextSeriesEpisode(prefill = '') {
+  if (typeof window === 'undefined') return false
+
+  try {
+    const normalizedPrefill = normalizeNextSeriesEpisodePrefill(prefill)
+    sessionStorage.setItem(NEXT_SERIES_EPISODE_KEY, JSON.stringify(normalizedPrefill))
+    return true
+  } catch (error) {
+    console.warn('缓存下一集电视剧续写信息失败。', error)
+    return false
+  }
+}
+
+export function consumeQueuedNextSeriesEpisode() {
+  if (typeof window === 'undefined') return false
+
+  const saved = sessionStorage.getItem(NEXT_SERIES_EPISODE_KEY)
+  if (!saved) return false
+
+  sessionStorage.removeItem(NEXT_SERIES_EPISODE_KEY)
+
+  try {
+    const payload = JSON.parse(saved)
+    prepareNextSeriesEpisode(payload || '')
+    return true
+  } catch (error) {
+    console.warn('恢复下一集电视剧续写信息失败。', error)
+    return false
+  }
 }
 
 const fieldsToWatch = [

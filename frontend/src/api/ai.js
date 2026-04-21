@@ -38,6 +38,15 @@ export const generatePipelineScript = async (idea, characters, outline, scriptFo
   })
 }
 
+export const generateSeriesNextEpisodePrefill = async (currentEpisode) => {
+  return await apiClient.post('/ai/narrative/series-next-episode-prefill', {
+    current_episode: currentEpisode,
+    script_format: 'series',
+  }, {
+    timeout: LONG_RUNNING_TIMEOUT,
+  })
+}
+
 export const getRuntimeAISettings = async () => {
   return await apiClient.get('/ai/runtime-settings')
 }

@@ -1369,6 +1369,308 @@ def _extract_json_payload(text: str) -> dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def _build_current_act_review_fallback_v2(
+    context: dict[str, Any],
+    *,
+    outline: str = "",
+    idea: str = "",
+    characters: str = "",
+) -> dict[str, Any]:
+    act_label = context.get("act_label") or "当前幕"
+    act_text = context.get("act_text") or ""
+    previous_content = context.get("previous_content") or ""
+    outline_items = context.get("act_outline_items") or []
+    enhancement_items: list[dict[str, Any]] = []
+    polish_items: list[dict[str, Any]] = []
+
+    def append_enhancement(title: str, text: str, reason: str, anchor: str = "") -> None:
+        text = str(text or "").strip()
+        if not text:
+            return
+        if any(item.get("text") == text for item in enhancement_items):
+            return
+        enhancement_items.append(
+            {
+                "title": str(title or "可补强点").strip() or "可补强点",
+                "text": text,
+                "reason": str(reason or "").strip(),
+                "anchor": str(anchor or "").strip(),
+            }
+        )
+
+    def append_polish(problem: str, snippet: str, reason: str, suggestion: str = "") -> None:
+        problem = str(problem or "").strip()
+        if not problem:
+            return
+        if any(item.get("problem") == problem for item in polish_items):
+            return
+        polish_items.append(
+            {
+                "problem": problem,
+                "snippet": str(snippet or "").strip() or _build_issue_excerpt(act_text),
+                "reason": str(reason or "").strip(),
+                "suggestion": str(suggestion or "").strip(),
+            }
+        )
+
+    if outline_items:
+        target_text = str(outline_items[0].get("text") or "").strip()
+        if target_text and len(_normalize_script(act_text)) < 1200:
+            append_enhancement(
+                "推进点还能更落地一点",
+                f"可把“{target_text}”写得更具体一点，补一处更明确的动作、反应或信息交换，让这一幕推进更扎实。",
+                "当前幕已经在往这个方向推进，但还可以再给一个更可拍、更具体的落点。",
+                target_text[:30],
+            )
+
+    if previous_content:
+        repetition = _detect_recent_repetition(previous_content, act_text)
+        if repetition.get("repetition_detected"):
+            append_polish(
+                "有些信息和前文过近，节奏还能更利落",
+                _build_issue_excerpt(act_text),
+                repetition.get("reason") or "这段和前文最近的推进过于接近，容易让当前幕显得重复。",
+                "可压缩重复交代，把篇幅让给新的动作推进、情绪反应或关系变化。",
+            )
+
+    if len(_normalize_script(act_text)) < 600:
+        append_enhancement(
+            "情绪或动作层还能再补一笔",
+            "可在关键转折前后补一处角色反应、动作细节或短对话，让这一幕的情绪起伏更完整。",
+            "当前幕信息推进有了，但人物体感还可以再厚一点。",
+            act_label,
+        )
+
+    return {
+        "enhancement": {
+            "has_issue": bool(enhancement_items),
+            "summary": (
+                f"{act_label}还有一些可以继续补强的小地方，优先补最影响现场感和推进感的部分。"
+                if enhancement_items
+                else f"{act_label}在“还能补什么”这一项上暂时没有明显补强点。"
+            ),
+            "items": enhancement_items[:4],
+        },
+        "polish": {
+            "has_issue": bool(polish_items),
+            "summary": (
+                f"{act_label}还有一些句段可以再压缩、提劲或写得更具体。"
+                if polish_items
+                else f"{act_label}在“哪些句段还能改得更好”这一项上暂时没有明显问题。"
+            ),
+            "items": polish_items[:4],
+        },
+        "summary": (
+            f"{act_label}整体已经能推进剧情，目前更适合做细节补强和句段优化。"
+            if enhancement_items or polish_items
+            else f"{act_label}整体比较稳定，暂时没有必须处理的明显优化点。"
+        ),
+        "next_step": (
+            "可继续点击“一键生成修改版本”，系统会围绕这些小优化点只重写当前这一幕。"
+            if enhancement_items or polish_items
+            else "当前幕整体稳定，可直接继续下一幕，或按需手动润色。"
+        ),
+    }
+
+
+def _analyze_current_act_with_model_v2(
+    context: dict[str, Any],
+    fallback_review: dict[str, Any],
+    *,
+    idea: str = "",
+    characters: str = "",
+) -> dict[str, Any]:
+    outline_digest = _build_outline_digest(
+        context.get("act_outline_items") or [],
+        "当前没有提取到可用的大纲节点。",
+        limit=4,
+    )
+    previous_digest = _build_recent_scene_digest(context.get("previous_content") or "", limit=2) or "- 无更早前文"
+    fallback_enhancement = "\n".join(
+        f"- {item.get('title', '可补强点')}：{item.get('text', '')}"
+        for item in (fallback_review.get("enhancement", {}).get("items") or [])
+    ) or "- 当前没有明显的补强候选"
+    fallback_polish = "\n".join(
+        f"- {item.get('problem', '')}：{item.get('reason', '')}"
+        for item in (fallback_review.get("polish", {}).get("items") or [])
+    ) or "- 当前没有明显的句段优化候选"
+
+    prompt = f"""你是中文剧本优化顾问。当前这一幕本来就是按大纲生成的，所以不要为了找大错而找大错，也不要硬挑“没覆盖全部节点”这种原则性问题。
+
+你的任务只有两个：
+1. 找出当前幕里“还可以补强什么”，也就是还能再加一点什么、再落地一点什么，能让这一幕更扎实、更有戏。
+2. 找出当前幕里“哪些句子或段落还可以改得更好”，也就是表达偏平、节奏略拖、动作反应不够具体、对话还可以更有力的地方。
+
+注意：
+- 不要把当前幕说成有严重方向性错误，除非真的非常明显。
+- 不要为了凑数强行制造问题。
+- 优先给小而准、能直接改进文本质量的建议。
+- 所有建议都只针对当前这一幕，不讨论下一幕怎么写。
+
+当前幕：{context.get("act_label") or "当前幕"}
+本幕对应的大纲要点（仅供判断还能补强什么，不要拿它硬判对错）：
+{outline_digest}
+
+前文最近场次（仅供判断承接和重复）：
+{previous_digest}
+
+人物设定（仅供把握人物关系与说话方式）：
+{characters or "未提供"}
+
+最早核心设定（仅供守住题设，不要扩写）：
+{_normalize_script(idea)[:600] or "未提供"}
+
+系统给出的低风险候选提示：
+可补强候选：
+{fallback_enhancement}
+
+可优化句段候选：
+{fallback_polish}
+
+当前这一幕正文：
+{context.get("act_text") or ""}
+
+请只返回 JSON：
+{{
+  "enhancement_summary": "一句话说明当前幕还有哪些地方可以补强；如果没有就写“这一方面暂时没有明显补强点”",
+  "enhancement_items": [
+    {{
+      "title": "补强点标题",
+      "text": "具体建议，写明可以加什么或强化什么",
+      "reason": "为什么这样改会更好",
+      "anchor": "建议落在当前幕哪一段附近，最多30字"
+    }}
+  ],
+  "polish_summary": "一句话说明哪些句段可以改得更好；如果没有就写“这一方面暂时没有明显可优化句段”",
+  "polish_items": [
+    {{
+      "problem": "句段可优化点标题",
+      "snippet": "建议修改的原文片段，最多60字",
+      "reason": "为什么这段可以改进",
+      "suggestion": "建议往哪个方向改"
+    }}
+  ],
+  "summary": "对当前幕整体优化空间的简短总结",
+  "next_step": "给用户的下一步建议"
+}}
+
+规则：
+1. enhancement_items 最多 3 条，polish_items 最多 3 条。
+2. 如果某一类没有明显建议，就返回 []。
+3. 不要输出 JSON 之外的任何内容。"""
+
+    raw, _ = generate_clean_content(prompt, max_tokens=1800)
+    return _extract_json_payload(raw)
+
+
+def _merge_current_act_review_v2(
+    context: dict[str, Any],
+    fallback_review: dict[str, Any],
+    model_review: dict[str, Any] | None,
+) -> dict[str, Any]:
+    act_label = context.get("act_label") or "当前幕"
+    enhancement_items: list[dict[str, Any]] = []
+    polish_items: list[dict[str, Any]] = []
+
+    def append_enhancement(item: dict[str, Any]) -> None:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return
+        if any(existing.get("text") == text for existing in enhancement_items):
+            return
+        enhancement_items.append(
+            {
+                "title": str(item.get("title") or "可补强点").strip() or "可补强点",
+                "text": text,
+                "reason": str(item.get("reason") or "").strip(),
+                "anchor": str(item.get("anchor") or "").strip(),
+            }
+        )
+
+    def append_polish(item: dict[str, Any]) -> None:
+        problem = str(item.get("problem") or "").strip()
+        if not problem:
+            return
+        if any(existing.get("problem") == problem for existing in polish_items):
+            return
+        polish_items.append(
+            {
+                "problem": problem,
+                "snippet": str(item.get("snippet") or "").strip() or _build_issue_excerpt(context.get("act_text") or ""),
+                "reason": str(item.get("reason") or "").strip(),
+                "suggestion": str(item.get("suggestion") or "").strip(),
+            }
+        )
+
+    for item in (model_review or {}).get("enhancement_items", []) or []:
+        if isinstance(item, dict):
+            append_enhancement(item)
+    for item in fallback_review.get("enhancement", {}).get("items", []) or []:
+        append_enhancement(item)
+
+    for item in (model_review or {}).get("polish_items", []) or []:
+        if isinstance(item, dict):
+            append_polish(item)
+    for item in fallback_review.get("polish", {}).get("items", []) or []:
+        append_polish(item)
+
+    enhancement_summary = str((model_review or {}).get("enhancement_summary") or "").strip()
+    if not enhancement_summary:
+        enhancement_summary = (
+            f"{act_label}还有一些可以继续补强的小地方。"
+            if enhancement_items
+            else f"{act_label}在“还能补什么”这一项上暂时没有明显补强点。"
+        )
+
+    polish_summary = str((model_review or {}).get("polish_summary") or "").strip()
+    if not polish_summary:
+        polish_summary = (
+            f"{act_label}还有一些句段可以再优化一下。"
+            if polish_items
+            else f"{act_label}在“哪些句段还能改得更好”这一项上暂时没有明显问题。"
+        )
+
+    has_issues = bool(enhancement_items or polish_items)
+    summary = str((model_review or {}).get("summary") or "").strip()
+    if not summary:
+        summary = (
+            f"{act_label}整体已经能推进剧情，目前更适合做细节补强和句段优化。"
+            if has_issues
+            else f"{act_label}整体比较稳定，暂时没有必须处理的明显优化点。"
+        )
+
+    next_step = str((model_review or {}).get("next_step") or "").strip()
+    if not next_step:
+        next_step = (
+            "可继续点击“一键生成修改版本”，系统会围绕这些优化建议只重写当前这一幕。"
+            if has_issues
+            else "当前幕整体稳定，可直接继续下一幕，或按需手动润色。"
+        )
+
+    enhancement = {
+        "has_issue": bool(enhancement_items),
+        "summary": enhancement_summary,
+        "items": enhancement_items[:4],
+    }
+    polish = {
+        "has_issue": bool(polish_items),
+        "summary": polish_summary,
+        "items": polish_items[:4],
+    }
+
+    return {
+        "act_label": act_label,
+        "current_act_text": context.get("act_text") or "",
+        "has_issues": has_issues,
+        "enhancement": enhancement,
+        "polish": polish,
+        "missing_outline": enhancement,
+        "off_outline": polish,
+        "summary": summary,
+        "next_step": next_step,
+    }
+
+
 def _analyze_current_act_with_model(
     context: dict[str, Any],
     missing_review: dict[str, Any],
@@ -1461,6 +1763,30 @@ def _build_current_act_review(
             "summary": empty_summary,
             "next_step": "请先生成当前幕正文，再进行问题分析。",
         }
+
+    fallback_review = _build_current_act_review_fallback_v2(
+        context,
+        outline=outline,
+        idea=idea,
+        characters=characters,
+    )
+
+    model_review = None
+    try:
+        model_review = _analyze_current_act_with_model_v2(
+            context,
+            fallback_review,
+            idea=idea,
+            characters=characters,
+        )
+    except Exception:
+        model_review = None
+
+    return _merge_current_act_review_v2(
+        context,
+        fallback_review,
+        model_review,
+    )
 
     missing_review = _build_missing_outline_review(context)
     off_outline_review = _build_off_outline_review_fallback(
@@ -1595,6 +1921,77 @@ def _build_off_outline_issue_lines(
     return "\n".join(lines) or empty_text
 
 
+def _build_enhancement_issue_lines_v2(
+    items: list[dict[str, Any]] | list[str],
+    empty_text: str = "- 这一方面暂时没有明显补强点，保持当前有效推进即可。",
+) -> str:
+    lines: list[str] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            text = str(item.get("text") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            anchor = str(item.get("anchor") or "").strip()
+            detail = text or title
+        else:
+            title = ""
+            detail = str(item or "").strip()
+            reason = ""
+            anchor = ""
+
+        if not detail:
+            continue
+
+        line = f"- {detail}"
+        detail_parts: list[str] = []
+        if title and title != detail:
+            detail_parts.append(f"标题：{title}")
+        if reason:
+            detail_parts.append(f"原因：{reason}")
+        if anchor:
+            detail_parts.append(f"建议位置：{anchor}")
+        if detail_parts:
+            line = f"{line}；{'；'.join(detail_parts)}"
+        lines.append(line)
+
+    return "\n".join(lines) or empty_text
+
+
+def _build_polish_issue_lines_v2(
+    items: list[dict[str, Any]] | list[str],
+    empty_text: str = "- 这一方面暂时没有明显可优化句段，保留当前有效表达即可。",
+) -> str:
+    lines: list[str] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            problem = str(item.get("problem") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            suggestion = str(item.get("suggestion") or "").strip()
+        else:
+            problem = str(item or "").strip()
+            snippet = ""
+            reason = ""
+            suggestion = ""
+
+        if not any((problem, snippet, reason, suggestion)):
+            continue
+
+        line = f"- {problem or '可优化句段'}"
+        detail_parts: list[str] = []
+        if snippet:
+            detail_parts.append(f"原文片段：{snippet}")
+        if reason:
+            detail_parts.append(f"原因：{reason}")
+        if suggestion:
+            detail_parts.append(f"优化方向：{suggestion}")
+        if detail_parts:
+            line = f"{line}；{'；'.join(detail_parts)}"
+        lines.append(line)
+
+    return "\n".join(lines) or empty_text
+
+
 def _build_current_act_revision_prompt(
     context: dict[str, Any],
     analysis: dict[str, Any],
@@ -1615,7 +2012,49 @@ def _build_current_act_revision_prompt(
         "当前幕还没有稳定落地的节点，可在修订时重新组织。",
         limit=3,
     )
-    missing_lines = _build_missing_issue_lines(analysis.get("missing_outline", {}).get("items") or [])
+    enhancement_section = analysis.get("enhancement") or analysis.get("missing_outline") or {}
+    polish_section = analysis.get("polish") or analysis.get("off_outline") or {}
+    missing_lines = _build_enhancement_issue_lines_v2(enhancement_section.get("items") or [])
+    off_outline_lines = _build_polish_issue_lines_v2(polish_section.get("items") or [])
+    previous_tail = (context.get("previous_content") or "")[-1800:] or "杩欐槸寮€鍦猴紝娌℃湁鏇存棭鍓嶆枃銆?"
+
+    return f"""你是专业中文编剧，请只重写当前这一幕，让它在不推翻原有走向的前提下更扎实、更有戏、更好读。当前剧本形式题材是“{format_label}”。
+下面列出的不是“原则性大错”，而是已经整理好的优化建议。你的任务是把这些建议真正落实到当前这一幕里，不要解释，不要总结，只输出优化后的当前幕正文。
+当前幕：{act_label}
+下一幕：{next_act_label}
+本幕对应的大纲要点（仅供守住这一幕该往哪里推进）：
+{outline_digest}
+
+当前这一幕已经比较有效的落点：
+{covered_digest}
+
+优化建议 1：当前幕还可以补强什么
+{missing_lines}
+
+优化建议 2：哪些句子或段落可以改得更好
+{off_outline_lines}
+
+人物设定（仅供承接，不要改人物身份）：
+{characters or "沿用当前正文里的人物关系"}
+
+最早核心设定（仅供守住题设，不要扩写说明）：
+{_normalize_script(idea)[:800] or "未提供"}
+
+修订要求：
+1. 只改当前这一幕，不要改前文，也不要补写下一幕。
+2. 这是一次“细节补强 + 句段优化”的修订，不要硬做原则性纠错，不要把文本改成另一场戏。
+3. 优先保留当前幕里已经有效的推进、动作和对话，只把需要补强和需要优化的地方改到位。
+4. 如果建议里提到“可以再加什么”，就把它自然落进当前幕里；如果提到“哪句还能更好”，就直接把那段改得更具体、更有力度。
+5. 改写时保持当前幕和前文的人物关系、冲突方向与叙事承接，不要另起炉灶。
+6. 输出必须是可拍摄的剧本正文，不要写“修改说明”“分析”“优化后”等任何解释性文字。
+7. 保持中文幕节标题、场次编号、内景/外景标题格式自然清晰。
+8. 尽量让人物反应、动作推进和对话力度更具体，而不是只换一些华丽词语。
+
+前文末尾（仅供承接，不要重写）：
+{previous_tail}
+
+当前这一幕原文：
+{context.get("act_text") or ""}"""
     off_outline_lines = _build_off_outline_issue_lines(analysis.get("off_outline", {}).get("items") or [])
     previous_tail = (context.get("previous_content") or "")[-1800:] or "这是开场，没有更早前文。"
 

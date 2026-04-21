@@ -6,7 +6,6 @@ const routes = [
   { path: "/login", name: "Login", component: () => import("./views/LoginView.vue") },
   { path: "/", name: "Pipeline", component: () => import("./views/PipelineView.vue"), meta: { requiresAuth: true } },
   { path: "/editor", name: "Editor", component: () => import("./views/EditorView.vue"), meta: { requiresAuth: true } },
-  { path: "/fingerprint", name: "Fingerprint", component: () => import("./views/FingerprintView.vue"), meta: { requiresAuth: true } },
   { path: "/settings", name: "Settings", component: () => import("./views/SettingsView.vue"), meta: { requiresAuth: true } },
 ]
 

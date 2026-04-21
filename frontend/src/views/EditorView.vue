@@ -8,10 +8,9 @@
       </div>
       <div class="hero-actions">
         <span class="chip">{{ statusText }}</span>
-        <el-button type="primary" :loading="loading" :disabled="!canGenerateNextAct" @click="generateNextAct">{{ nextActButtonText }}</el-button>
-        <el-button plain @click="exportPdf">导出 PDF</el-button>
-        <el-button plain @click="extractFingerprint">叙事指纹</el-button>
-        <el-button plain @click="showVersionHistory = true">时光机（{{ versionHistory.length }}）</el-button>
+        <el-button type="primary" :loading="loading" :disabled="!canGenerateNextAct" title="根据当前剧本文本继续生成下一幕" @click="generateNextAct">{{ nextActButtonText }}</el-button>
+        <el-button v-if="!showSeriesCompletionActions" plain title="导出当前剧本文本为 PDF" @click="exportPdf">导出 PDF</el-button>
+        <el-button plain title="查看并恢复历史自动存档版本" @click="showVersionHistory = true">时光机（{{ versionHistory.length }}）</el-button>
       </div>
     </section>
 
@@ -35,7 +34,11 @@
         <strong>{{ latestActReviewed ? '剧本已到达当前收口点' : '当前题材已生成到最后一幕' }}</strong>
         <p>{{ completionMessage }}</p>
       </div>
-      <el-button type="success" plain @click="exportPdf">导出 PDF</el-button>
+      <div v-if="showSeriesCompletionActions" class="done-actions">
+        <el-button plain :loading="preparingNextEpisode" title="导出当前集 PDF，并自动进入下一集创作" @click="exportPdfAndContinueSeries">生成下一集并生成当前集 PDF</el-button>
+        <el-button type="success" plain :disabled="preparingNextEpisode" title="当前为最后一集，仅导出本集 PDF" @click="exportPdf">当前是最后一集生成 PDF</el-button>
+      </div>
+      <el-button v-else type="success" plain title="导出当前剧本文本为 PDF" @click="exportPdf">导出 PDF</el-button>
     </section>
 
     <div class="layout">
@@ -55,27 +58,29 @@
           <header class="card-head light">
             <div>
               <p class="kicker muted">AI Notes</p>
-              <h2>当前幕 AI 修改意见</h2>
+              <h2>当前幕 AI 优化建议</h2>
             </div>
             <div class="advice-actions">
-              <el-button size="small" :loading="adviceLoading" @click="generateCurrentActReview">一键生成AI修改意见</el-button>
+              <el-button size="small" :loading="adviceLoading" title="分析当前幕里还能补强什么、哪些句子或段落还能改得更好" @click="generateCurrentActReview">一键生成AI优化建议</el-button>
               <el-button
                 v-if="currentActAnalysis?.has_issues && !currentActRevision"
                 size="small"
                 type="warning"
                 :loading="revisionLoading"
+                title="基于当前优化建议生成可替换的优化版本"
                 @click="generateCurrentActRevision"
               >
-                一键生成修改版本
+                一键生成优化版本
               </el-button>
               <el-button
                 v-if="currentActRevision"
                 size="small"
                 type="success"
                 :loading="applyingRevision"
+                title="将 AI 优化版本直接应用到当前幕正文"
                 @click="applyCurrentActRevision"
               >
-                一键应用修改
+                一键应用优化
               </el-button>
             </div>
           </header>
@@ -84,8 +89,8 @@
             <div v-if="currentActAnalysis" class="review-grid">
               <article class="review-card">
                 <div class="review-card-head">
-                  <span>问题 1</span>
-                  <strong>当前幕是否完整覆盖本幕大纲</strong>
+                  <span>建议 1</span>
+                  <strong>当前幕还可以补强什么</strong>
                 </div>
                 <p class="review-summary">{{ currentActAnalysis.missing_outline?.summary }}</p>
                 <div
@@ -93,18 +98,18 @@
                   :key="`editor-missing-${idx}`"
                   class="review-row"
                 >
-                  <strong>缺失节点 {{ idx + 1 }}</strong>
+                  <strong>补强建议 {{ idx + 1 }}</strong>
                   <p>{{ item.text }}</p>
                 </div>
                 <p v-if="!(currentActAnalysis.missing_outline?.items || []).length" class="review-ok">
-                  这一方面没有明显问题。
+                  这一方面暂时没有明显补强点。
                 </p>
               </article>
 
               <article class="review-card">
                 <div class="review-card-head">
-                  <span>问题 2</span>
-                  <strong>当前幕是否有脱离大纲的内容</strong>
+                  <span>建议 2</span>
+                  <strong>哪些句子或段落还可以改得更好</strong>
                 </div>
                 <p class="review-summary">{{ currentActAnalysis.off_outline?.summary }}</p>
                 <div
@@ -117,7 +122,7 @@
                   <pre v-if="item.snippet">{{ item.snippet }}</pre>
                 </div>
                 <p v-if="!(currentActAnalysis.off_outline?.items || []).length" class="review-ok">
-                  这一方面没有明显问题。
+                  这一方面暂时没有明显可优化句段。
                 </p>
               </article>
             </div>
@@ -125,8 +130,8 @@
             <section v-if="currentActRevision" class="revision-box">
               <div class="revision-box-head">
                 <div>
-                  <p class="kicker muted">AI Revision</p>
-                  <h3>当前幕修改版本</h3>
+                  <p class="kicker muted">AI Polish</p>
+                  <h3>当前幕优化版本</h3>
                 </div>
                 <span class="pill">
                   可直接应用
@@ -166,7 +171,7 @@
               <el-tag size="small" :type="idx === 0 ? 'success' : 'info'">{{ idx === 0 ? '最新版本' : `#${versionHistory.length - idx}` }}</el-tag>
               <strong>{{ version.savedAtReadable }}</strong>
             </div>
-            <el-button size="small" type="primary" plain :loading="restoringVersion === version.id" @click="restoreToVersion(version)">恢复到此版本</el-button>
+            <el-button size="small" type="primary" plain :loading="restoringVersion === version.id" title="用该历史版本覆盖当前内容" @click="restoreToVersion(version)">恢复到此版本</el-button>
           </div>
           <pre class="version-preview">{{ getVersionPreview(version) }}</pre>
         </article>
@@ -186,11 +191,13 @@ import {
   reviseCurrentAct,
   syncNarrativeGraph,
 } from '../api/narrative'
-import { globalState } from '../stores/project'
+import { generateSeriesNextEpisodePrefill } from '../api/ai'
+import { globalState, queueNextSeriesEpisode } from '../stores/project'
 import { getRequestErrorMessage } from '../utils/apiError'
 import { getLockedCompletionNotice } from '../utils/completionText'
 import { formatActProgress, getCurrentActLabel, getNextActLabel } from '../utils/actProgress'
 import { openScreenplayPdfWindow } from '../utils/pdfExport'
+import { resolveScriptFormat } from '../utils/scriptFormat'
 import { normalizeScriptText } from '../utils/scriptText'
 
 const AUTOSAVE_KEY = 'AI_SCREENPLAY_VERSIONS_V2'
@@ -210,8 +217,10 @@ const currentActRevision = ref(null)
 const adviceLoading = ref(false)
 const revisionLoading = ref(false)
 const applyingRevision = ref(false)
+const preparingNextEpisode = ref(false)
 const completionState = ref(globalState.pipelineCompletionSnapshot || null)
 const scriptFormat = computed(() => globalState.pipelineScriptFormat || 'movie')
+const isSeriesScript = computed(() => resolveScriptFormat(scriptFormat.value) === 'series')
 const latestActReviewed = computed(() => Boolean(globalState.pipelineLatestActReviewed))
 const sharedGenerationBusy = computed(() => Boolean(globalState.pipelineGenerationInFlight))
 const generationBusy = computed(() => loading.value || sharedGenerationBusy.value)
@@ -228,6 +237,7 @@ const completionLockedByState = computed(() => Boolean(
 const currentActLabel = computed(() => getCurrentActLabel(completionState.value, code.value, scriptFormat.value))
 const nextActLabel = computed(() => getNextActLabel(completionState.value, scriptFormat.value, code.value))
 const locked = computed(() => completionLockedByState.value)
+const showSeriesCompletionActions = computed(() => locked.value && isSeriesScript.value)
 const outlineStatusText = computed(() => {
   if (!normalizeText(code.value)) return '尚未生成剧本'
   return formatActProgress(completionState.value, code.value, {
@@ -586,10 +596,68 @@ const exportPdf = () => {
   if (!exported) ElMessage.warning('请先准备剧本文本，并允许浏览器弹出导出窗口。')
 }
 
-const extractFingerprint = () => {
-  globalState.scriptContent = normalizeText(code.value)
-  ElMessage.success('当前剧本文本已同步，正在跳转到叙事指纹页。')
-  router.push({ name: 'Fingerprint' })
+const saveManualCheckpoint = (description) => {
+  if (typeof window === 'undefined' || typeof window.saveManually !== 'function') return
+  try {
+    window.saveManually(description)
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+const exportPdfAndContinueSeries = async () => {
+  const currentEpisode = normalizeText(code.value)
+  if (!currentEpisode) {
+    ElMessage.warning('请先准备当前集剧本文本，再继续生成下一集。')
+    return
+  }
+
+  const exported = openScreenplayPdfWindow({ title: globalState.title, content: currentEpisode })
+  if (!exported) {
+    ElMessage.warning('请先准备剧本文本，并允许浏览器弹出导出窗口。')
+    return
+  }
+
+  preparingNextEpisode.value = true
+  saveManualCheckpoint('电视剧当前集导出后进入下一集')
+  let nextEpisodePrefill = {
+    previousEnding: currentEpisode,
+    characterFocus: '',
+    toneDirection: '',
+    cliffhanger: '',
+  }
+
+  try {
+    const response = await generateSeriesNextEpisodePrefill(currentEpisode)
+    const fields = response?.data?.fields || {}
+    nextEpisodePrefill = {
+      previousEnding: normalizeText(fields.previous_ending || currentEpisode),
+      characterFocus: normalizeText(fields.character_focus || ''),
+      toneDirection: normalizeText(fields.tone_direction || ''),
+      cliffhanger: normalizeText(fields.cliffhanger || ''),
+    }
+  } catch (error) {
+    console.error(error)
+    ElMessage.warning('下一集预填建议生成失败，先保留上一集承接内容；你仍可手动调整其余字段。')
+  }
+
+  const queued = queueNextSeriesEpisode(nextEpisodePrefill)
+  if (!queued) {
+    preparingNextEpisode.value = false
+    ElMessage.warning('当前集 PDF 导出窗口已打开，但暂时无法自动带入下一集信息，请稍后重试。')
+    return
+  }
+
+  try {
+    await router.push({ name: 'Pipeline' })
+  } catch (error) {
+    console.error(error)
+    const base = import.meta.env.BASE_URL || '/'
+    window.location.href = `${base}#/`
+    return
+  } finally {
+    preparingNextEpisode.value = false
+  }
 }
 
 const handleResize = () => {
@@ -654,6 +722,7 @@ onUnmounted(() => {
 .metric strong { font-size: 24px; color: #10233e; }
 .done-banner { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 22px; padding: 18px 20px; border-radius: 20px; border: 1px solid rgba(52, 168, 83, 0.14); background: linear-gradient(135deg, #effaf2, #f8fffa); color: #275a31; }
 .done-banner p { margin: 6px 0 0; color: #4b6f55; line-height: 1.7; }
+.done-actions { display: flex; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
 .layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.95fr); gap: 20px; align-items: start; }
 .main-col { display: grid; gap: 20px; }
 .card { overflow: hidden; background: #fff; }

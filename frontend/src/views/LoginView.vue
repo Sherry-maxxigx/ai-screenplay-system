@@ -5,11 +5,11 @@
       <section class="poster">
         <p class="badge">SCREENPLAY OS</p>
         <h1>欢迎进入智能剧本工作台</h1>
-        <p>登录后可使用剧本生成、历史会话、个性化创作空间与指纹存证能力。</p>
+        <p>登录后可使用剧本生成、历史会话、个性化创作空间与指纹留存能力。</p>
         <ul>
-          <li>✓ 用户身份识别（评委可见完整产品形态）</li>
-          <li>✓ 账号级创作空间（支持后续历史记录扩展）</li>
-          <li>✓ 登录态控制（实现基础权限隔离）</li>
+          <li>用户身份识别，便于演示完整产品形态</li>
+          <li>账号级创作空间，支持后续历史记录扩展</li>
+          <li>登录态控制，实现基础权限隔离</li>
         </ul>
       </section>
 
@@ -24,17 +24,17 @@
             <el-input v-model="form.password" type="password" show-password placeholder="请输入密码" />
           </el-form-item>
           <el-form-item v-if="mode === 'login'">
-            <el-checkbox v-model="rememberMe">记住我</el-checkbox>
+            <el-checkbox v-model="rememberMe" :title="rememberMeTitle">记住我</el-checkbox>
           </el-form-item>
 
-          <el-button type="primary" :loading="loading" class="submit-btn" @click="submit">
+          <el-button type="primary" :loading="loading" class="submit-btn" :title="submitButtonTitle" @click="submit">
             {{ mode === 'login' ? '登录并进入系统' : '创建账号' }}
           </el-button>
         </el-form>
 
         <div class="switch-line">
           <span>{{ mode === 'login' ? '没有账号？' : '已有账号？' }}</span>
-          <el-button text @click="switchMode">{{ mode === 'login' ? '去注册' : '去登录' }}</el-button>
+          <el-button text :title="switchModeButtonTitle" @click="switchMode">{{ mode === 'login' ? '去注册' : '去登录' }}</el-button>
         </div>
 
         <div class="hint" v-if="mode === 'login'">
@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElForm, ElFormItem, ElInput, ElCheckbox, ElButton } from 'element-plus'
 import { loginAPI, registerAPI } from '../api/auth'
@@ -59,6 +59,7 @@ const formRef = ref()
 const loading = ref(false)
 const rememberMe = ref(true)
 const mode = ref('login')
+const rememberMeTitle = '记住当前登录状态，下次打开时继续保留这个账号会话'
 
 const form = reactive({
   username: '',
@@ -76,6 +77,18 @@ const rules = {
 const switchMode = () => {
   mode.value = mode.value === 'login' ? 'register' : 'login'
 }
+
+const submitButtonTitle = computed(() => (
+  mode.value === 'login'
+    ? '使用当前账号密码登录系统，并进入你要访问的页面'
+    : '创建一个新账号；注册成功后会自动切回登录模式'
+))
+
+const switchModeButtonTitle = computed(() => (
+  mode.value === 'login'
+    ? '切换到注册模式，创建新账号'
+    : '切换回登录模式，使用已有账号登录系统'
+))
 
 onMounted(() => {
   if (route.query.fresh === '1') {

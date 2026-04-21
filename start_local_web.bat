@@ -27,6 +27,8 @@ set "LOCAL_NODE_DIR=%ROOT_DIR%\.localtools\node-v20.20.2-win-x64"
 set "BROWSER_EXE="
 set "SKIP_FRONTEND_BUILD=1"
 set "LOCAL_APP_SESSION_MODE_VALUE=0"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 if exist "%ROOT_DIR%\.venv\Scripts\python.exe" (
   set "PYTHON_EXE=%ROOT_DIR%\.venv\Scripts\python.exe"
@@ -65,56 +67,67 @@ if errorlevel 1 (
   )
 )
 
-call :ensure_node
-if errorlevel 1 (
-  if not exist "%FRONTEND_DIST%" (
-    echo [ERROR] Node.js was not found and frontend dist is missing.
+if defined FORCE_FRONTEND_BUILD (
+  echo Checking source file encoding...
+  "%PYTHON_EXE%" "%ROOT_DIR%\scripts\check_mojibake.py"
+  if errorlevel 1 (
+    echo [ERROR] Source encoding check failed.
+    echo Fix mojibake before rebuilding the frontend.
+    pause
+    exit /b 1
+  )
+
+  call :ensure_node
+  if errorlevel 1 (
+    echo [ERROR] Node.js was not found.
     echo Install Node.js 18+ or keep the portable Node folder under .localtools.
     pause
     exit /b 1
   )
-  echo Node.js was not found. Reusing the existing frontend dist.
-) else (
-  if defined FORCE_FRONTEND_BUILD set "SKIP_FRONTEND_BUILD="
-  if not exist "%FRONTEND_DIST%" set "SKIP_FRONTEND_BUILD="
 
-  if defined SKIP_FRONTEND_BUILD (
-    echo Reusing the existing frontend dist bundle.
-  ) else (
-    if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
-      echo Installing frontend dependencies...
-      pushd "%FRONTEND_DIR%"
-      call npm install
-      set "NPM_EXIT=%ERRORLEVEL%"
-      popd
-      if not "!NPM_EXIT!"=="0" (
-        echo [ERROR] Frontend dependency installation failed.
-        pause
-        exit /b 1
-      )
-    )
-
-    echo Building the latest frontend bundle...
+  if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
+    echo Installing frontend dependencies...
     pushd "%FRONTEND_DIR%"
+    call npm install
+    set "NPM_EXIT=%ERRORLEVEL%"
+    popd
+    if not "!NPM_EXIT!"=="0" (
+      echo [ERROR] Frontend dependency installation failed.
+      pause
+      exit /b 1
+    )
+  )
+
+  echo Building the latest frontend bundle...
+  pushd "%FRONTEND_DIR%"
+  call npm run build
+  set "BUILD_EXIT=%ERRORLEVEL%"
+  if not "!BUILD_EXIT!"=="0" (
+    echo Frontend build failed once. Retrying in 2 seconds...
+    timeout /t 2 /nobreak >nul
     call npm run build
     set "BUILD_EXIT=%ERRORLEVEL%"
-    if not "!BUILD_EXIT!"=="0" (
-      echo Frontend build failed once. Retrying in 2 seconds...
-      timeout /t 2 /nobreak >nul
-      call npm run build
-      set "BUILD_EXIT=%ERRORLEVEL%"
+  )
+  popd
+  if not "!BUILD_EXIT!"=="0" (
+    if exist "%FRONTEND_DIST%" (
+      echo [WARN] Frontend build failed, but an existing dist bundle was found.
+      echo [WARN] Continuing with the last successful frontend build.
+    ) else (
+      echo [ERROR] Frontend build failed and no existing frontend dist is available.
+      pause
+      exit /b 1
     )
-    popd
-    if not "!BUILD_EXIT!"=="0" (
-      if exist "%FRONTEND_DIST%" (
-        echo [WARN] Frontend build failed, but an existing dist bundle was found.
-        echo [WARN] Continuing with the last successful frontend build.
-      ) else (
-        echo [ERROR] Frontend build failed and no existing frontend dist is available.
-        pause
-        exit /b 1
-      )
-    )
+  )
+) else (
+  if exist "%FRONTEND_DIST%" (
+    echo Reusing the existing frontend dist bundle.
+  ) else (
+    echo [ERROR] The shared package is missing frontend\dist.
+    echo This one-click startup no longer rebuilds the frontend on the recipient machine.
+    echo Rebuild the frontend on the source machine and include the full frontend\dist folder before sharing.
+    pause
+    exit /b 1
   )
 )
 

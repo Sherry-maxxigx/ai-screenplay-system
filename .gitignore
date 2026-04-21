@@ -15,3 +15,5 @@ run_logs/
 .idea/
 .localtools/
 .localruntime/
+!frontend/dist/
+!frontend/dist/**

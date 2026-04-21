@@ -11,9 +11,27 @@
         </div>
 
         <nav class="nav-menu">
-          <router-link to="/" class="nav-link">自动化工坊</router-link>
-          <router-link to="/editor" class="nav-link">显性创作轨</router-link>
-          <router-link to="/settings" class="nav-link">设置中心</router-link>
+          <router-link
+            to="/"
+            class="nav-link"
+            title="进入自动化工坊，按步骤生成核心设定、人物设定、剧情大纲和分幕正文"
+          >
+            自动化工坊
+          </router-link>
+          <router-link
+            to="/editor"
+            class="nav-link"
+            title="进入显性创作轨，继续精修剧本文本并按幕续写"
+          >
+            显性创作轨
+          </router-link>
+          <router-link
+            to="/settings"
+            class="nav-link"
+            title="进入设置中心，调整默认模型、采样参数和 API Key"
+          >
+            设置中心
+          </router-link>
         </nav>
 
         <div class="user-profile">
@@ -22,7 +40,7 @@
             <strong>{{ authState.user?.username || '创作会话' }}</strong>
             <span>{{ authState.user?.role || 'workspace_001' }}</span>
           </div>
-          <el-button size="small" text @click="handleLogout">退出</el-button>
+          <el-button size="small" text title="退出当前账号并返回登录页" @click="handleLogout">退出</el-button>
         </div>
       </el-header>
 

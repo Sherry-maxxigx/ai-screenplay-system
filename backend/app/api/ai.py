@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, Optional
 
@@ -59,6 +60,35 @@ class PipelineScriptRequest(BaseModel):
     script_format: str = DEFAULT_SCRIPT_FORMAT
 
 
+class NextSeriesEpisodePrefillRequest(BaseModel):
+    current_episode: str = Field(min_length=1)
+    script_format: str = "series"
+
+
+SERIES_NEXT_EPISODE_FIELD_SPECS = [
+    {
+        "key": "previous_ending",
+        "label": "上一集结尾剧情",
+        "description": "只概括上一集临近结尾、对下一集最关键的剧情状态、悬念和未解决问题，不要把整集正文原样搬进来。",
+    },
+    {
+        "key": "character_focus",
+        "label": "本集人物重心",
+        "description": "为下一集提炼最适合作为主推进的人物焦点，写清下集最值得跟进的人物、核心困境和关键选择。",
+    },
+    {
+        "key": "tone_direction",
+        "label": "本集调性与走向",
+        "description": "概括下一集应延续或升级的情绪基调、冲突走向和叙事节奏。",
+    },
+    {
+        "key": "cliffhanger",
+        "label": "本集结尾悬念",
+        "description": "写下一集结束时最适合留下的悬念、反转或钩子。这一项写的是下一集的结尾悬念，不是当前集结尾的重复复述。",
+    },
+]
+
+
 SAFETY_PATTERNS = {
     "tencent": [
         "制作炸弹",
@@ -96,6 +126,15 @@ def clean_text_output(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = clean_text_output(text)
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        raise ValueError("模型没有返回 JSON 对象")
+
+    return json.loads(match.group(0))
 
 
 def looks_garbled(text: str) -> bool:
@@ -274,7 +313,7 @@ def generate_clean_content_with_meta(
     raw, response_meta = call_model_with_meta(prompt, effective, max_tokens=max_tokens)
     text = clean_text_output(raw)
     if looks_garbled(text):
-        raise ValueError("妯″瀷杩斿洖鍐呭鐤戜技涔辩爜")
+        raise ValueError("模型返回内容疑似乱码")
     return text, effective, response_meta
 
 
@@ -653,6 +692,66 @@ def build_outline_prompt(idea: str, characters: str, script_format: str = DEFAUL
 """
 
 
+def build_series_next_episode_prefill_prompt(current_episode: str) -> str:
+    field_lines = "\n".join(
+        f"{index + 1}. {item['key']} / {item['label']}：{item['description']}"
+        for index, item in enumerate(SERIES_NEXT_EPISODE_FIELD_SPECS)
+    )
+    return f"""你是一名中文电视剧分集策划助理。你的任务不是总结全文，而是根据“当前这一集已经生成好的完整正文”，为“下一集自动化工坊”里的 4 个输入框分别生成预填内容。
+
+请严格按照下面每个输入框的填写目标来写，不能把整集正文原样搬进去，也不能把四个字段写成同一种内容：
+{field_lines}
+
+规则：
+1. 只输出 JSON，不要输出解释、前后缀或 Markdown。
+2. 必须保留当前集已经形成的角色关系、主线任务、冲突方向和悬念来源，不要脱离现有正文另起炉灶。
+3. previous_ending 只写“上一集结尾对下一集最关键的承接信息”，控制在 2 到 4 句。
+4. character_focus 要写“下一集最值得跟进的人物重心”，不能只是重复上一集发生了什么，控制在 2 到 4 句。
+5. tone_direction 要写“下一集的调性与走向”，控制在 1 到 3 句。
+6. cliffhanger 要写“下一集结束时应该留下什么悬念”，控制在 1 到 3 句，不能直接重复当前集已经出现过的结尾句子。
+7. 所有字段都必须返回非空字符串。
+
+输出格式：
+{{
+  "previous_ending": "上一集结尾剧情",
+  "character_focus": "本集人物重心",
+  "tone_direction": "本集调性与走向",
+  "cliffhanger": "本集结尾悬念"
+}}
+
+当前这一集的完整正文：
+{current_episode}
+"""
+
+
+def generate_series_next_episode_prefill(current_episode: str) -> tuple[dict[str, str], dict[str, Any]]:
+    prompt = build_series_next_episode_prefill_prompt(current_episode)
+    raw, effective = generate_clean_content(prompt, temperature=0.35, max_tokens=1400)
+    payload = _extract_json_object(raw)
+
+    result: dict[str, str] = {}
+    for field in SERIES_NEXT_EPISODE_FIELD_SPECS:
+        key = field["key"]
+        compact_key = key.replace("_", "")
+        camel_key = "".join(
+            part if index == 0 else part[:1].upper() + part[1:]
+            for index, part in enumerate(key.split("_"))
+        )
+        value = clean_text_output(
+            str(
+                payload.get(key)
+                or payload.get(compact_key)
+                or payload.get(camel_key)
+                or ""
+            )
+        )
+        if not value:
+            raise ValueError(f"字段 {key} 为空")
+        result[key] = value
+
+    return result, effective
+
+
 @router.get("/runtime-settings")
 def get_runtime_settings():
     ensure_runtime_settings_file()
@@ -765,3 +864,25 @@ def generate_pipeline_script_api(req: PipelineScriptRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"剧本第一幕生成失败：{exc}")
+@router.post("/narrative/series-next-episode-prefill")
+def generate_series_next_episode_prefill_api(req: NextSeriesEpisodePrefillRequest):
+    script_format = normalize_script_format(req.script_format)
+    if script_format != "series":
+        raise HTTPException(status_code=400, detail="该接口当前仅支持电视剧/连续剧模式")
+
+    current_episode = clean_text_output(req.current_episode)
+    if not current_episode:
+        raise HTTPException(status_code=400, detail="当前集正文不能为空")
+
+    try:
+        fields, effective = generate_series_next_episode_prefill(current_episode)
+        meta = build_meta(effective, "model", "series_next_episode_prefill")
+        return {
+            "script_format": script_format,
+            "fields": fields,
+            "meta": meta,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"下一集自动预填生成失败：{exc}")
