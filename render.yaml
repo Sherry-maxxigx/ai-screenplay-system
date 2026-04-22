@@ -19,4 +19,5 @@ services:
       - key: NEO4J_PASSWORD
         sync: false
       - key: CORS_ORIGINS
+        value: https://sherry-maxxigx.github.io,https://sherry-maxxigx.github.io/ai-screenplay-system/,http://localhost:3000,http://127.0.0.1:8000
         sync: false
