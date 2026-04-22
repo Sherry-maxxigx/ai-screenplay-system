@@ -9,7 +9,8 @@ const apiClient = axios.create({
   timeout: LONG_RUNNING_TIMEOUT,
   headers: {
     'Content-Type': 'application/json'
-  }
+  },
+  withCredentials: true
 })
 
 // Generate Character Profiles
